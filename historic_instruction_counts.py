@@ -669,8 +669,8 @@ def debug():
     next_sweep_batch(history, data, delta_threshold=0.02, verbose=True)
     return
 
-    # first = "86148602102e833cc2e04eca9707a53c3287f50c"
-    # second = "5d5f156558b515b37b32e18702744a2c5092b64d"
+    # first = "c6d0fdd21537a2c23f94e7a44ac552d24b447906"
+    # second = "e7a09b4d17010e60bc95c25f8165ef479d1b9612"
 
     # for i in os.listdir(RECORDS_PATH):
     #     if i.endswith(".counts.pkl"):
@@ -682,7 +682,7 @@ def debug():
     #         with open(os.path.join(RECORDS_PATH, i), "rb") as f:
     #             _, r1 = pickle.load(f)
 
-    # stmt = TASKS[1][0]
+    # stmt = TASKS[-3][0]
     # for counts, times in r0:
     #     if counts.stmt == stmt:
     #         print(counts, "\n", times, "\n")

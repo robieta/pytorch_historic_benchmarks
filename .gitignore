@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Scratch space for historic_instruction_counts.py
+sweep_working_dir/
+
+# Root for intermediate artifacts.
+workspace/
