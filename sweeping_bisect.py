@@ -338,9 +338,9 @@ class Runner:
             sha = self._history[i][0]
             self.maybe_enqueue_build(sha)
 
-        segment_results = self.segment_results()
+        segment_results, _, _ = self.segment_results()
         for threshold in [0.25, 0.05, 0.01, 0.001]:
-            for r in segment_results:
+            for r in segment_results[::-1]:
                 max_abs_delta = max(abs(i) for i in r["Count deltas"] if i is not None)
                 intermediate_shas = r["Intermediate SHAs"]
                 if max_abs_delta >= threshold and intermediate_shas:
@@ -405,16 +405,7 @@ class Runner:
                 "Time deltas": deltas(t0, t1, time_lwm),
                 "Messages": (msg_0, msg_1),
             })
-        return output
-
-    def debug(self):
-        for r in self.segment_results():
-            max_delta = max(abs(i) for i in r["Count deltas"] if i is not None)
-            if max_delta < 0.05:
-                continue
-
-            median_delta = statistics.median(i for i in r["Count deltas"] if i is not None)
-            print(f"{max_delta * 100:5.1f}%,  {median_delta * 100:5.1f}%,  {len(r['Intermediate SHAs']):>4}")
+        return output, count_lwm, time_lwm
 
     def get_torch_location(self, conda_env):
         lines = []
@@ -594,9 +585,8 @@ def merge_measurements():
         pickle.dump([simple_counts, simple_times], f)
 
 
-def debug():
-    threshold = 0.1
-
+def make_report():
+    """Horrible hacky mess of HTML. But it works..."""
     builder = build_pytorch.PytorchBuildHelper(
         root_dir=WORKSPACE_ROOT,
         clean=False,
@@ -605,31 +595,56 @@ def debug():
     )
     runner = Runner(builder)
 
+    threshold = 0.03
+    color_factor = 2
+    background_color = "Black"
+
+    def color_by_value(x):
+        increment = 0.05
+        if x > 0:
+            # Red
+            scale = [
+                "#333333",
+                '#808080', '#867979', '#8c7373', '#936c6c', '#996666',
+                '#9f6060', '#a65959', '#ac5353', '#b34d4d', '#b94646',
+                '#bf4040', '#c63939', '#cc3333', '#d22d2d', '#d92626',
+                '#df2020', '#e61919', '#ec1313', '#f20d0d', '#f90606',
+                '#ff0000'
+            ]
+        else:
+            scale = [
+                "#333333",
+                '#737373', '#6d786d', '#677e67', '#628462', '#5c8a5c',
+                '#568f56', '#509550', '#4b9b4b', '#45a145', '#3fa63f',
+                '#39ac39', '#34b234', '#2eb82e', '#28bd28', '#22c322',
+                '#1dc91d', '#17cf17', '#11d411', '#0bda0b', '#06e006',
+                '#00e600'
+            ]
+        index = min(int(abs(x) // increment), len(scale) - 1)
+        return scale[index]
+
     newline = "\n"
-    lines = [[]]
+    lines = [[f"<H3>{'&nbsp;' * 110}</H3>"]]
     count = 0
     partition_indices = [-1]
     for n, task_name in _TASK_GROUPS:
-        lines[-1].append(f"<H3><u>{task_name}</u></H3>")
+        lines.append([f"<H3><u>{task_name}</u></H3>"])
         for _ in range(n):
-            lines[-1].append(f"<b>[{count}]</b>&nbsp; {TASKS[count][1]}&nbsp<br>")
+            lines[-1].append(f"<b>[{count}]</b>&nbsp; {TASKS[count][1]}{'&nbsp' * 5}<br>")
             count += 1
-        if len(lines[-1]) >= 10:
-            lines.append([])
         partition_indices.append(partition_indices[-1] + n)
-    if not lines[-1]:
-        lines.pop()
     lines = [['<td style="vertical-align:top">'] + l + ["</td>\n"] for l in lines]
     lines = list(it.chain(*lines))
     partition_indices = set(partition_indices[1:])
 
-    results = runner.segment_results()
+    results, count_lwm, time_lwm = runner.segment_results()
     filtered_results = []
     for r in results:
-        if any(i >= threshold for i in r["Count deltas"]):
+        if any(abs(i) >= threshold for i in r["Count deltas"]) or r is results[-1]:
             filtered_results.append(r)
 
-    padding = ["<td></td>"] * 4
+    n_padding = 4
+    padding = ["<td></td>"] * n_padding
     result_lines = ["<tr>"] + padding
     for i in range(len(TASKS)):
         result_lines.append(f'<th style="text-align:right">[{i}]</th>')
@@ -644,28 +659,55 @@ def debug():
         ])
     result_lines.append("</tr>")
 
+    current_date_str = filtered_results[-1]["Dates"][1].strftime("%m/%d")
+    for key, lwm in (("Counts", count_lwm), ("Times", time_lwm)):
+        border_str = ";border-bottom: 1px dashed white" if key == "Times" else ""
+        result_lines.extend([
+            "<tr>",
+            f'<td style="text-align:right{border_str}" colspan="{n_padding}">'
+            f"\u0394 {key}:{'&nbsp;' * 5} Current ( {current_date_str} ) vs. Low water mark (+X %) {'&nbsp;' * 5}"
+            "</td>",
+        ])
+        for i, (x, x_lwm) in enumerate(zip(filtered_results[-1][key][1], lwm)):
+            color = color_by_value(x / x_lwm - 1)
+            result_lines.append(
+                f'<td style="text-align:right;color:{color}{border_str}">'
+                f"{(x / x_lwm - 1) * 100:.0f}"
+                "</td>"
+            )
+            if i in partition_indices:
+                result_lines.append(f'<td style="text-align:right{border_str}">&nbsp;:</td>')
+        result_lines.append("</tr>")
 
-    color_codes = [
-        ("LightGreen", -threshold, True),
-        ("ForestGreen", -0.25 * threshold, False),
-        ("DarkGreen", 0, False),
-        ("Maroon", 0.25 * threshold, False),
-        ("FireBrick", threshold, False),
-        ("Red", None, True)
-    ]
+    result_lines.extend([
+        "<tr>",
+        f'<td style="text-align:right" colspan="{n_padding}">',
+        f"Wall time (us) {'&nbsp;' * 5}"
+        "</td>",
+    ])
+    for i, t in enumerate(filtered_results[-1]["Times"][1]):
+        result_lines.append(
+            f'<td style="text-align:right">'
+            f"{t * 1e6:.1f}</td>"
+        )
+        if i in partition_indices:
+            result_lines.append(f'<td style="text-align:right">&nbsp;:</td>')
+    result_lines.extend([
+        "<tr>",
+        f'<td colspan="{n_padding + len(TASKS) + len(_TASK_GROUPS)}" style="border-bottom: 2px solid white">',
+        "</td>",
+        "</tr>",
+    ] * 2)
+
     def color_value(x, y, max_abs_delta, border=False):
         bold = False
         if x is None or y is None:
             color = "White"
             s = "--"
-        elif abs(x) < 0.05 * threshold or abs(x) < max_abs_delta * 0.01:
-            color = "Black"
-            s = ""
         else:
-            for color, color_threshold, bold in color_codes:
-                if color_threshold is None or y <= color_threshold:
-                    break
+            color = color_by_value(y / threshold / color_factor)
             s = f"{y * 100:.1f}"
+            bold = y >= threshold
         if bold:
             s = f"<b>{s}</b>"
         border_str = ";border-bottom: 1px dashed white" if border else ""
@@ -709,8 +751,8 @@ def debug():
                 td_template = '<td rowspan="2" style="text-align:{align};border-bottom: 1px dashed white">'
                 string_counts.extend([
                     td_template.format(align="right"),
-                    f"{sha_to_url(r['SHAs'][0])}<br>{sha_to_url(r['SHAs'][1])}",
-                    "</td>",
+                    (f"{sha_to_url(r['SHAs'][0])}<br>" if n_intermediate > 1 else '') +
+                    f"{sha_to_url(r['SHAs'][1])}</td>",
                     f'{td_template.format(align="left")}{msg}</td>',
                     f'{td_template.format(align="center")}{date_str}</td>',
                     f'{td_template.format(align="center")}\u0394C&nbsp; :<br>\u0394T&nbsp; :</td>',
@@ -723,26 +765,63 @@ def debug():
                 "\n".join(["<tr>"] + string_counts + ["</tr>\n"])
             )
 
+    table_width = f"{7 * len(TASKS) + 100}ch"
     body = textwrap.dedent(f"""\
     <HTML>
-      <body style="background-color:Black;color:WhiteSmoke">
+      <body style="background-color:{background_color};color:WhiteSmoke">
 
-      <table style="width:130%">
+      <table style="width:{table_width}">
 {textwrap.indent(newline.join(lines), ' ' * 6)}
       </table>
 
       <br><br><br>
 
-      <table style="width:170%">
+      <table style="width:{table_width}">
 {textwrap.indent(newline.join(result_lines), ' ' * 6)}
       </table>
       <body>
     </HTML>
     """)
 
-    # print(body)
-    with open("/mnt/shared/taylorrobie/public_html/test.html", "wt") as f:
+    fpath = f"/mnt/shared/{os.getenv('USER')}/public_html/historic_sweep.html"
+    print(f"Path: {fpath}")
+    with open(fpath, "wt") as f:
         f.write(body)
+
+
+def debug():
+    builder = build_pytorch.PytorchBuildHelper(
+        root_dir=WORKSPACE_ROOT,
+        clean=False,
+        soft_clean=False,
+        main_loop=False,
+    )
+    runner = Runner(builder)
+    results, _, _ = runner.segment_results()
+
+    target_index = 2
+    target_sha = "2b13d9413e55fb270cc5f1f7fb91f77dbc7167c7"
+    for r in results:
+        if target_sha == r["SHAs"][1]:
+            sha_0, sha_1 = r["SHAs"]
+
+    with open(runner._state["finished"][sha_0][0], "rb") as f:
+        counts_0, _ = pickle.load(f)
+
+    with open(runner._state["finished"][sha_1][0], "rb") as f:
+        counts_1, _ = pickle.load(f)
+
+    c0 = counts_0[target_index][1].as_standardized()
+    c1 = counts_1[target_index][1].as_standardized()
+
+    import torch
+    torch.set_printoptions(linewidth=200)
+
+    import pdb
+    pdb.set_trace()
+
+    print(c0.delta(c1, inclusive=True))
+    c0.delta(c1, inclusive=False)[:15]
 
 
 def main():
@@ -750,7 +829,7 @@ def main():
         root_dir=WORKSPACE_ROOT,
         clean=False,
         soft_clean=False,
-        main_loop=False,
+        main_loop=True,
     )
 
     os.makedirs(SCRATCH_ROOT, exist_ok=True)
@@ -765,6 +844,7 @@ _MODES = {
     "measure_counts": measure_counts,
     "measure_times": measure_times,
     "merge_measurements": merge_measurements,
+    "make_report": make_report,
     "debug": debug,
 }
 
