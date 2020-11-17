@@ -18,7 +18,7 @@ from . import misc as misc_utils
 
 DATE_FMT = "%Y-%m-%d"
 CONDA_ENV_TEMPLATE = "env_{n:0>2}"
-MAX_ACTIVE_ENVS = 25
+MAX_ACTIVE_ENVS = 200
 
 _NAMESPACE_LOCK = threading.Lock()
 
@@ -42,14 +42,15 @@ class BuildConfig:
 
         self._python_version = collections.defaultdict(lambda: "3.8")
         self._build_tests = collections.defaultdict(lambda: "0")
+        self._mkl_version = collections.defaultdict(lambda: "")
 
-        for sha, _, _ in history:
+        for sha, _, _, _, _ in history:
             if sha == "86c64440c9169d94bffb58b523da1db00c896703":
                 break
             self._python_version[sha] = "3.7"
 
         build_tests = False
-        for sha, _, _ in history:
+        for sha, _, _, _, _ in history:
             if sha == "ddff4efa26d527c99cd9892278a32529ddc77e66":
                 build_tests = True
 
@@ -60,11 +61,36 @@ class BuildConfig:
                 build_tests = False
                 break
 
+        mkl_conda_releases = (
+            ("", "2019-09-16"),
+            ("2019.5", "2019-09-15"),
+            ("2019.4", "2019-05-15"),
+            ("2019.3", "2019-03-15"),
+            # 2020.2 missing from release notes.
+            ("2019.1", "2018-11-15"),
+            ("2019.0", "2018-09-15"),
+        )
+
+        for sha, date, _, _, _ in history[18000:]:
+            version = ""
+            for version, d in mkl_conda_releases:
+                dt = (
+                    datetime.datetime.strptime(date, DATE_FMT) -
+                    datetime.datetime.strptime(d, DATE_FMT)
+                )
+                if dt.total_seconds() >= 0:
+                    break
+            if version:
+                self._mkl_version[sha] = version
+
     def python_version(self, sha_or_branch):
         return self._python_version[sha_or_branch]
 
     def build_tests(self, sha_or_branch):
         return self._build_tests[sha_or_branch]
+
+    def mkl_version(self, sha_or_branch):
+        return self._mkl_version[sha_or_branch]
 
 
 class PytorchBuildHelper:
@@ -106,8 +132,8 @@ class PytorchBuildHelper:
         self._build_config = BuildConfig(self._git_history_path)
         with open(self._git_history_path, "rt") as f:
             self._git_history = [
-                (sha, datetime.datetime.strptime(date, DATE_FMT), msg)
-                for sha, date, msg in json.load(f)
+                (sha, datetime.datetime.strptime(date, DATE_FMT), author_name, author_email, msg)
+                for sha, date, author_name, author_email, msg in json.load(f)
             ]
 
         with open(self._cannot_build_path, "rt") as f:
@@ -120,6 +146,7 @@ class PytorchBuildHelper:
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         check: bool = False,
+        timeout: Optional[float] = None,
         per_line_fn: Optional[Callable[[str], NoReturn]] = None,
         conda_env: Optional[str] = None,
         task_name: Optional[str] = None,
@@ -132,13 +159,19 @@ class PytorchBuildHelper:
             if not entry:
                 return
 
-            if cmd:
+            if cmd and cmd[-1][-1] != ";":
                 cmd.append("&&")
 
             cmd.extend(entry)
 
         if conda_env is not None:
             add_to_cmd(["source", "activate", conda_env])
+
+        if env is not None:
+            # For some reason, the env arg doesn't play nice with CCache and
+            # passing it will cause caching to not work.
+            for k, v in env.items():
+                add_to_cmd(["export", f"{k}={repr(v)}"])
 
         for l in args.splitlines(keepends=False):
             add_to_cmd(shlex.split(l.strip(), comments=True))
@@ -151,22 +184,13 @@ class PytorchBuildHelper:
         stdout = os.path.join(self._log_dir, f"{log_prefix}_stdout.log")
         stderr = os.path.join(self._log_dir, f"{log_prefix}_stderr.log")
 
-        proc_env = {
-            "PATH": os.getenv("PATH"),
-            "HOME": os.getenv("HOME"),
-            "no_proxy": os.getenv("no_proxy"),
-            "http_proxy": os.getenv("http_proxy"),
-            "https_proxy": os.getenv("https_proxy"),
-        }
-        proc_env.update(env or {})
-
         with open(summary, "wt") as f:
             f.write(
                 f"Cmd:\n{textwrap.dedent(args).strip()}\n\n"
                 f"Parsed:\n{' '.join(cmd)}\n\n"
                 f"Stdout: {stdout}\n"
                 f"Stderr: {stderr}\n"
-                f"Env:\n{json.dumps(proc_env, indent=4)}\n\n"
+                f"Env:\n{json.dumps(env or {}, indent=4)}\n\n"
             )
 
         stdout_f = open(stdout, "wb")
@@ -179,10 +203,10 @@ class PytorchBuildHelper:
                 stdout=stdout_f,
                 stderr=stderr_f,
                 shell=shell,
-                cwd=cwd,
-                env=proc_env,
+                cwd=cwd or os.getcwd(),
             )
 
+            start_time = time.time()
             while True:
                 stdout_lines = stdout_f_read.read().decode("utf-8")
                 if stdout_lines:
@@ -194,6 +218,13 @@ class PytorchBuildHelper:
                 retcode = proc.poll()
                 if retcode is not None:
                     break
+
+                if timeout and time.time() - start_time >= timeout:
+                    proc.terminate()
+                    print("Cmd timed out")
+                    retcode = 1
+                    break
+
                 time.sleep(0.001)
 
             if retcode:
@@ -227,9 +258,9 @@ class PytorchBuildHelper:
     def get_history_since(self, start_date: str):
         t0 = datetime.datetime.strptime(start_date, DATE_FMT)
         output = []
-        for sha, date, msg in self._git_history:
+        for sha, date, author_name, author_email, msg in self._git_history:
             if output or (date - t0).total_seconds() >= 0:
-                output.append((sha, date, msg))
+                output.append((sha, date, author_name, author_email, msg))
         return output
 
     def _checkout_pytorch(self):
@@ -255,8 +286,9 @@ class PytorchBuildHelper:
         )
 
         lines = []
+        sep = "_____PARTITION_____"
         self.subprocess_call(
-            f"git log --pretty='format:%H %ai %s' | cat",
+            f"git log --pretty='format:%H %ai {sep} %aN {sep} %aE {sep} %s' | cat",
             shell=True,
             cwd=self._clean_checkout,
             check=True,
@@ -264,15 +296,18 @@ class PytorchBuildHelper:
         )
 
         history = []
-        pattern = re.compile(r"^([a-z0-9]{40}) ([0-9\-]{10}) [0-9:]+ [\-0-9]+ (.+)$")
+        pattern = re.compile(
+            r"^([a-z0-9]{40}) ([0-9\-]{10}) [0-9:]+ [\-0-9]+ " +
+            sep + r" (.+) " + sep + r" (.+) " + sep + " (.+)$"
+        )
         for l in lines[::-1]:
             match = pattern.match(l)
             if match:
-                sha, date, msg = match.groups()
+                sha, date, author_name, author_email, msg = match.groups()
                 # We're only interested in date for the initial sweep, so we
                 # don't need to worry about HH:MM:SS.
                 date = datetime.datetime.strptime(date, DATE_FMT).strftime(DATE_FMT)
-                history.append((sha, date, msg))
+                history.append((sha, date, author_name, author_email, msg))
 
         assert len(history)
         with open(self._git_history_path, "wt") as f:
@@ -287,8 +322,8 @@ class PytorchBuildHelper:
             return
 
         try:
-            conda_env = self._make_conda_env(checkout)
             pytorch_path = os.path.join(self._build_dir, f"pytorch_{uuid.uuid4()}")
+            conda_env = self._make_conda_env(checkout)
             shutil.copytree(self._clean_checkout, pytorch_path)
 
             self.subprocess_call(
@@ -328,6 +363,7 @@ class PytorchBuildHelper:
                 f"""
                 # CCACHE variables are generally in `.bashrc`
                 source ~/.bashrc
+                which c++ | awk '{{print "which c++: "$1}}'
 
                 {taskset_str}{nice_str}python -u setup.py clean
                 {taskset_str}{nice_str}python -u setup.py install
@@ -346,6 +382,8 @@ class PytorchBuildHelper:
                     "REL_WITH_DEB_INFO": "1",
                     "MKL_THREADING_LAYER": "GNU",
                     "MAX_JOBS": "" if max_jobs is None else str(max_jobs),
+
+                    "CFLAGS": "-Wno-error=stringop-truncation",
                 },
                 per_line_fn=per_line_fn if show_progress else None,
                 conda_env=conda_env,
@@ -353,6 +391,8 @@ class PytorchBuildHelper:
             )
 
             if retcode:
+                # import pdb
+                # pdb.set_trace()
                 self.mark_unbuildable(checkout)
                 shutil.rmtree(conda_env)
                 return
@@ -399,6 +439,8 @@ class PytorchBuildHelper:
 
             env_path = os.path.join(self._env_dir, env_name)
             py_version = self._build_config.python_version(sha_or_branch)
+            mkl_version = self._build_config.mkl_version(sha_or_branch)
+            mkl_spec = f"=={mkl_version}" if mkl_version else ""
 
             self.subprocess_call(
                 f"conda create --no-default-packages -y --prefix {env_path} python={py_version}",
@@ -409,8 +451,8 @@ class PytorchBuildHelper:
 
         self.subprocess_call(
             f"""
-            source activate {env_path}
-            conda install -y numpy ninja pyyaml mkl mkl-include setuptools cmake cffi hypothesis typing_extensions
+            conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11
+            pip install cppimport
             """,
             shell=True,
             check=True,
