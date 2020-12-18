@@ -33,20 +33,15 @@ SWEEP_START = "2019-06-01"
 SWEEP_CADENCE = 3  # days
 
 # Loop is now in fine-tuning mode.
-IGNORE_BEFORE = "2020-06-01"
+IGNORE_BEFORE = "2020-11-01"
 
 
 NUM_CORES = multiprocessing.cpu_count()
 assert NUM_CORES in (80,)
 if NUM_CORES == 80:
-    if IGNORE_BEFORE:
-        CORES_PER_WORK_UNIT = 20
-        CALLGRIND_EXTRA_CORES = 5
-        NUM_CONCURRENT_WORK_UNITS = 4
-    else:
-        CORES_PER_WORK_UNIT = 8
-        CALLGRIND_EXTRA_CORES = 4
-        NUM_CONCURRENT_WORK_UNITS = 8
+    CORES_PER_WORK_UNIT = 8
+    CALLGRIND_EXTRA_CORES = 4
+    NUM_CONCURRENT_WORK_UNITS = 8
 
 MAX_CALLGRIND_WORKERS = math.ceil(NUM_CONCURRENT_WORK_UNITS / 2) + 1
 
@@ -63,9 +58,7 @@ REPORT_THREHOLDS = FILTER_THRESHOLDS[:3]
 
 CALLGRIND_REPLICATES = 3
 CALLGRIND_LOOP_NUMBER = 10000
-
-# WALL_TIME_REPLICATES = 10
-# WALL_TIME_SEC = 10
+WALL_TIME_SEC = 10
 
 PASS = "pass"
 SCALAR_X = "x = torch.ones((1,))"
@@ -404,6 +397,12 @@ class Runner:
 
                 if initial_sweep_complete:
                     self.bisect()
+
+                    if not self._active_workers and not self.state.build_queue and not self.state.test_queue:
+                        print("No work. Stopping.")
+                        self._stop = True
+                        break
+
                 time.sleep(60)
 
                 status_new = (
@@ -422,10 +421,6 @@ class Runner:
                     os.remove(STOP_FILE)
                     self._stop = True
 
-                if not self._active_workers and not self.state.build_queue and not self.state.test_queue:
-                    print("No work. Stopping.")
-                    self._stop = True
-
         elif worker_id <= MAX_CALLGRIND_WORKERS:
             while not self._stop:
                 self._active_workers += 1
@@ -441,6 +436,7 @@ class Runner:
                     self.build()
                 self._active_workers -= 1
                 time.sleep(random.random() * 30)
+
         else:
             while not self._stop:
                 self._active_workers += 1
@@ -719,6 +715,99 @@ class Runner:
         os.makedirs(scratch_dir)
         return scratch_dir
 
+    def timing_loop(self):
+        results, _, _ = self.segment_results(mask_suspect=True)
+
+        measure_shas = set()
+        for r in results:
+            abs_deltas = [
+                max(abs(i) for i in (i_p, i_c) if i is not None)
+                for i_p, i_c in zip(r["Count deltas (Python)"], r["Count deltas (C++)"])
+                if i_p is not None or i_c is not None
+            ]
+
+            measure = False
+            for n, threshold in FILTER_THRESHOLDS:
+                measure |= sum(1 for d in abs_deltas if d >= threshold * 1.5) >= n
+
+            if measure:
+                measure_shas.add(r["SHAs"][0])
+                measure_shas.add(r["SHAs"][1])
+        measure_shas = tuple(measure_shas)
+
+        staging_area = os.path.join(SCRATCH_ROOT, "intermediate_timing")
+        if os.path.exists(staging_area):
+            shutil.rmtree(staging_area)
+        os.makedirs(staging_area)
+
+        time_dirs = {}
+        for sha in measure_shas:
+            time_dirs[sha] = os.path.join(RESULTS_ROOT, f"times_{sha}")
+            os.makedirs(time_dirs[sha], exist_ok=True)
+
+        work_queue = queue.Queue()
+        block_size = 6
+        reserved_cores = 4
+        def map_fn(worker_id):
+            if not worker_id:
+                generation = -1
+                for _ in range(50):
+                    while work_queue.qsize() > len(measure_shas) * 2:
+                        time.sleep(30)
+
+                    generation += 1
+                    generation_tasks = []
+                    for sha in measure_shas:
+                        task_indices = list(range(len(TASKS)))
+                        random.shuffle(task_indices)
+                        task_groups = [[]]
+                        for task_index in task_indices:
+                            task_groups[-1].append(task_index)
+                            if len(task_groups[-1]) == block_size and task_index != task_indices[-1]:
+                                task_groups.append([])
+                        for g in task_groups:
+                            generation_tasks.append((generation, sha, tuple(g)))
+                    random.shuffle(generation_tasks)
+                    for i in generation_tasks:
+                        work_queue.put(i)
+            elif worker_id == 1:
+                while not self._stop:
+                    self._pytorch_builder.subprocess_call(
+                        "sudo /usr/local/fbprojects/dynamoserver/bin/turboDriver disable",
+                        shell=True,
+                        check=True,
+                    )
+                    time.sleep(20)
+            else:
+                # Reserve the first four cores for the runner.
+                worker_core = worker_id + (reserved_cores - 2)
+                assert worker_core < NUM_CORES
+
+                while not self._stop:
+                    try:
+                        generation, sha, task_indices = work_queue.get(timeout=10)
+                    except queue.Empty:
+                        break
+
+                    indices_str = ",".join([str(i) for i in task_indices])
+                    output_path = os.path.join(staging_area, f"{sha}__{generation}__{indices_str}.pkl")
+                    with open(output_path, "wb") as f:
+                        pickle.dump(task_indices, f)
+
+                    conda_env = self.state.built[sha]
+                    self._pytorch_builder.subprocess_call(
+                        f"taskset --cpu-list {worker_core} "
+                        f"python -u {os.path.abspath(__file__)} "
+                        f"--mode measure_times --result_file {output_path}",
+                        shell=True,
+                        check=True,
+                        conda_env=conda_env,
+                    )
+
+        num_workers = NUM_CORES - reserved_cores
+        with multiprocessing.dummy.Pool(num_workers) as pool:
+            pool.map(map_fn, range(num_workers))
+
 
 class SubprocessDataPipe:
     def __init__(self):
@@ -828,31 +917,30 @@ def measure_counts():
 
 
 def measure_times(task_index=None):
-    raise NotImplementedError
-    # from torch.utils.benchmark import Timer
-    # from utils.make_jit_functions import make_globals
+    from torch.utils.benchmark import Timer
+    from utils.make_jit_functions import make_globals
 
-    # if task_index is None:
-    #     task_indices = _SUBPROCESS_PIPE.read()
-    # else:
-    #     task_indices = [task_index]
+    is_manual_run = (task_index is not None)
+    task_indices = (
+        [task_index] if is_manual_run
+        else _SUBPROCESS_PIPE.read())
 
-    # for task_index in task_indices:
-    #     setup, stmt = TASKS[task_index]
-    #     g = make_globals(stmt)
-    #     try:
-    #         m = Timer(
-    #             stmt,
-    #             setup=setup,
-    #             globals=g,
-    #         ).blocked_autorange(min_run_time=WALL_TIME_SEC)
+    for task_index in task_indices:
+        setup, stmt = TASKS[task_index]
+        try:
+            g = make_globals(stmt)
+            m = Timer(
+                stmt,
+                setup=setup,
+                globals=g,
+            ).blocked_autorange(min_run_time=WALL_TIME_SEC)
 
-    #     except:
-    #         if task_index is not None:
-    #             raise
-    #         m = None
+        except:
+            if is_manual_run:
+                raise
+            m = None
 
-    #     _SUBPROCESS_PIPE.push((task_index, m))
+        _SUBPROCESS_PIPE.push((task_index, m))
 
 
 def post_process():
@@ -963,7 +1051,7 @@ def cull():
     )
 
     runner = Runner(builder)
-    results, _, _ = runner.segment_results(mask_suspect=False)
+    results, _, _ = runner.segment_results(mask_suspect=True)
     shas = [r["SHAs"] for r in results]
 
     # Culling the initial sweep is pointless as it would just be re-run.
@@ -987,11 +1075,15 @@ def cull():
             shas_to_cull.remove(s)
 
     for r in results:
-        rel_deltas = r["Count deltas (C++)"] + r["Count deltas (Python)"]
+        abs_deltas = [
+            max(abs(i) for i in (i_p, i_c) if i is not None)
+            for i_p, i_c in zip(r["Count deltas (Python)"], r["Count deltas (C++)"])
+            if i_p is not None or i_c is not None
+        ]
+
         keep_shas = False
         for n, threshold in FILTER_THRESHOLDS:
-            threshold = min(threshold, 0.01)
-            keep_shas |= sum(1 for d in rel_deltas if d is not None and abs(d) >= threshold) >= n
+            keep_shas |= sum(1 for d in abs_deltas if d >= threshold * 0.7) >= n
         if keep_shas:
             for s in r["SHAs"]:
                 if s in shas_to_cull:
@@ -1092,9 +1184,6 @@ def _make_report(threshold_multiplier=1, name="test"):
     results, count_lwm_python, count_lwm_cpp = runner.segment_results(mask_suspect=True)
     filtered_results = []
     for r in results:
-        python_abs_deltas = [abs(i) for i in r["Count deltas (Python)"] if i is not None]
-        cpp_abs_deltas = [abs(i) for i in r["Count deltas (C++)"] if i is not None]
-
         abs_deltas = [
             max(abs(i) for i in (i_p, i_c) if i is not None)
             for i_p, i_c in zip(r["Count deltas (Python)"], r["Count deltas (C++)"])
@@ -1308,8 +1397,9 @@ def _make_report(threshold_multiplier=1, name="test"):
 
 
 def make_report():
-    _make_report(threshold_multiplier=1, name="bisect_report")
-    _make_report(threshold_multiplier=1.5, name="bisect_report_strict")
+    # _make_report(threshold_multiplier=1, name="bisect_report")
+    # _make_report(threshold_multiplier=1.5, name="bisect_report_strict")
+    _make_report(threshold_multiplier=1, name="bisect_report_debug")
 
 
 def debug():
@@ -1323,33 +1413,51 @@ def debug():
     runner = Runner(builder)
     print(len(runner.state.built), len(runner.state.finished))
 
-    sha_0 = "b64cf93f056d97cfe47ffee5611e9c70d0df489c"
+    first_sha = None
+    history = builder.get_history_since("2020-07-01")
+    for i in history:
+        sha = i[0]
+        if sha in runner.state.finished:
+            first_sha = first_sha or sha
+            last_sha = sha
 
-    results, _, _ = runner.segment_results()
-    for r in results:
-        if r["SHAs"][1] == sha_0:
-            ref_counts = r["Counts (Python)"][1] + r["Counts (C++)"][1]
-            print(r["Counts (Python)"][1], r["Counts (C++)"][1])
-            print()
+    for i in history:
+        if i[0] in (first_sha, last_sha):
+            print(i)
 
-    current_counts = r["Counts (Python)"][1] + r["Counts (C++)"][1]
-    sha_1 = r["SHAs"][1]
+    with open(runner.state.finished[first_sha][1], "rb") as f:
+        old_results = pickle.load(f)
 
-    output = []
-    for idx, (i_ref, i_current, task) in enumerate(zip(ref_counts, current_counts, TASKS + CPP_TASKS)):
-        if i_ref is None or i_current is None:
-            continue
-        output.append([
-            idx % len(TASKS),
-            task[0],
-            task[1],
-            i_ref,
-            i_current,
-        ])
+    with open(runner.state.finished[last_sha][1], "rb") as f:
+        new_results = pickle.load(f)
 
     import json
-    with open("/mnt/shared/taylorrobie/public_html/that_which_is_measured_improved.json", "wt") as f:
-        json.dump([sha_0, sha_1, output], f, indent=4)
+    import statistics
+    results = []
+    for (_, stmt), old_py_cts, new_py_cts, old_cpp_cts, new_cpp_cts in zip(_TASKS, old_results["Python"], new_results["Python"], old_results["C++"], new_results["C++"]):
+        results.append(["Python", stmt, [statistics.median(old_py_cts), statistics.median(new_py_cts)]])
+
+        cpp_stmt = CPP_ANALOGS.get(stmt)
+        if cpp_stmt is None:
+            results.append(["C++", "No analog tested", [None, None]])
+        else:
+            results.append(["C++", cpp_stmt, [statistics.median(old_cpp_cts), statistics.median(new_cpp_cts)]])
+
+    rel_diffs = []
+    for lang, stmt, (c_old, c_new) in results:
+        if not c_old:
+            continue
+        stmt = stmt if isinstance(stmt, str) else " \\n ".join(stmt)
+        print(f"{lang:<8} {(c_new - c_old) / c_new * 100:>8.1f}%   {stmt}")
+        rel_diffs.append((c_new - c_old) / c_new)
+    print(statistics.mean(rel_diffs))
+
+    # results = {"Old SHA": first_sha, "New SHA": last_sha, "Counts": results}
+    # with open("/mnt/shared/taylorrobie/public_html/that_which_is_measured_improves.json", "wt") as f:
+    #     json.dump(results, f, indent=4)
+
+
+    # runner.timing_loop()
 
 
 def main():
