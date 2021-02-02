@@ -79,6 +79,7 @@ def make_conda_env(
 
     call(
         f"""
+        conda config --env --add channels intel
         conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11 ipython
         conda install -y -c conda-forge valgrind
         """,
@@ -180,6 +181,8 @@ def _build(
         )
 
     if retcode:
+        import pdb
+        pdb.set_trace()
         mark_unbuildable(checkout)
         shutil.rmtree(conda_env)
 

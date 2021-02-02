@@ -9,6 +9,8 @@ import time
 from typing import Callable, Dict, List, NoReturn, Optional
 import uuid
 
+from v2.workspace import RUN_IN_PROGRESS_ROOT
+
 
 # Copied from: https://github.com/python/cpython/blob/1ed83adb0e95305af858bd41af531e487f54fee7/Lib/subprocess.py#L529
 def list2cmdline(seq):
@@ -153,7 +155,7 @@ def call(
             stdout=stdout_f,
             stderr=stderr_f,
             shell=shell,
-            cwd=cwd or os.getcwd(),
+            cwd=cwd or RUN_IN_PROGRESS_ROOT,
         )
 
         start_time = time.time()
@@ -178,6 +180,8 @@ def call(
         if retcode:
             cleanup_logs = False
             write_to_progress(f"Cmd failed. Logs: {summary}")
+            if check:
+                raise ValueError(f"Cmd failed. Logs: {summary}")
 
         return retcode
 

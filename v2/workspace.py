@@ -21,6 +21,9 @@ RUN_COMPLETED_ROOT = os.path.join(WORKSPACE_ROOT, "run__completed")
 # touch this file to stop the build/test loop.
 STOP_FILE = os.path.join(WORKSPACE_ROOT, "stop")
 
+# touch this file to stop the build/test loop.
+PDB_FILE = os.path.join(WORKSPACE_ROOT, "pdb")
+
 REF_REPO_ROOT = os.path.join(WORKSPACE_ROOT, "pytorch")
 BENCHMARK_BRANCH_NAME = "gh/taylorrobie/timer_ci_prep"
 BENCHMARK_BRANCH_ROOT = os.path.join(WORKSPACE_ROOT, "pytorch_benchmark_branch")

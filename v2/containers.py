@@ -33,3 +33,19 @@ class History:
             c for c in self.commits
             if (c.date - t0).total_seconds() >= 0
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class BenchmarkResult:
+    language: str
+    autograd: str
+    runtime: str
+    wall_time: float
+    instructions: int
+
+
+@dataclasses.dataclass(frozen=True)
+class BenchmarkResults:
+    sha: str
+    conda_env: str
+    values: Tuple[BenchmarkResult, ...]
