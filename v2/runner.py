@@ -13,12 +13,12 @@ from typing import Deque, Dict, Generic, Iterable, List, Optional, Set, TypeVar
 
 from torch.utils.benchmark import CallgrindStats, Language, Measurement
 
-from v2.build import build_clean
+from v2.build import build_clean, check_unbuildable
 from v2.containers import BenchmarkResult, BenchmarkResults
 from v2 import init_pytorch
-from v2.runner_interface import backport, clean_backport, get_benchmarks, BenchmarkRunner, InstrumentedCorePool, RuntimeMode, WorkOrder
+from v2.runner_interface import backport, clean_backport, get_benchmarks, AutogradMode, BenchmarkRunner, InstrumentedCorePool, RuntimeMode, WorkOrder
 from v2.logging_subprocess import call
-from v2.runner_policy import benchmark_may_fail, BASELINE_BUILD_CORE_COUNT, MAX_BUILD_CORES, NUM_CORES, OPPORTUNISTIC_BUILD_CORE_COUNTS, POOL_SLACK
+from v2.runner_policy import get_exclude_sets, BASELINE_BUILD_CORE_COUNT, NUM_CORES, OPPORTUNISTIC_BUILD_CORE_COUNTS, POOL_SLACK
 from v2.workspace import (
     BUILD_COMPLETED_ROOT, DATE_FMT, MUTATION_LOCK, PDB_FILE, RUN_LOG_ROOT,
     RUN_COMPLETED_ROOT, RUNNER_STATE_ROOT, STOP_FILE, SWEEP_CADENCE, SWEEP_START)
@@ -198,7 +198,6 @@ class Runner:
         # init_pytorch.fetch_fbcode_warm()
         self._state = RunnerState.from_file(frozen=False)
         self._core_pool = InstrumentedCorePool(POOL_SLACK)
-        self._remaining_build_cores = MAX_BUILD_CORES
         self._lock = threading.RLock()
         self._history = init_pytorch.get_history().since(SWEEP_START)
         self._history_dict = {commit.sha: commit for commit in self._history}
@@ -211,12 +210,9 @@ class Runner:
                 self._initial_sweep_indices.append(i)
         self._initial_sweep_indices.append(i + 1)
 
-        # Debug:
-        self._initial_sweep_indices = self._initial_sweep_indices[:100]
-        # self._initial_sweep_indices = self._initial_sweep_indices[:10]
-
         for i in self._initial_sweep_indices:
-            self._state.maybe_enqueue_build(self._history[i].sha)
+            if not check_unbuildable(self._history[i].sha):
+                self._state.maybe_enqueue_build(self._history[i].sha)
 
         self._stop = False
         self._benchmarks = None
@@ -227,12 +223,13 @@ class Runner:
 
         # Does not include control loop.
         num_workers = 6  # TODO: tune.
-        with multiprocessing.dummy.Pool(num_workers) as pool:
+        with multiprocessing.dummy.Pool(num_workers + 1) as pool:
             pool.map(self.worker_fn, range(num_workers + 1), 1)
 
     def worker_fn(self, worker_id: int):
         # Worker 0 is the control loop.
         if not worker_id:
+
             while not self._stop:
                 if os.path.exists(PDB_FILE):
                     os.remove(PDB_FILE)
@@ -241,9 +238,12 @@ class Runner:
 
                     # print(sum([n.num_available for n in self._core_pool._nodes]))
 
+                    # print("\n".join([" ".join([str(j) for j in i]) for i in self._core_pool._log]))
+
                 if os.path.exists(STOP_FILE):
                     os.remove(STOP_FILE)
                     self._stop = True
+                    print("Stop registered.")
                     return
 
                 if not self.scheduled_work:
@@ -256,12 +256,12 @@ class Runner:
 
         while not self._stop:
             if worker_id <= 3:
-                # Reserve three workers for building.
+                # Reserve four workers for building.
                 self.build()
 
             else:
                 self.measure()
-                self.build()
+                # self.build()
             time.sleep(10)
 
     @property
@@ -274,32 +274,23 @@ class Runner:
         ])
 
     def build(self):
-        with self._lock:
-            if not self._state.queue_len(TaskType.BUILD):
-                return
+        priority = (BASELINE_BUILD_CORE_COUNT,)
+        if self.scheduled_work + BASELINE_BUILD_CORE_COUNT < NUM_CORES:
+            priority = OPPORTUNISTIC_BUILD_CORE_COUNTS + priority
 
-            priority = (BASELINE_BUILD_CORE_COUNT,)
-            if self.scheduled_work + BASELINE_BUILD_CORE_COUNT < NUM_CORES:
-                priority = OPPORTUNISTIC_BUILD_CORE_COUNTS + priority
+        for core_request in priority:
+            allocation = self._core_pool.reserve(core_request)
 
-            for core_request in priority:
-                if core_request > self._remaining_build_cores:
-                    continue
+        if allocation is None:
+            return
 
-                allocation = self._core_pool.reserve(core_request)
-                if allocation:
-                    self._remaining_build_cores -= core_request
-                    break
-
-            if allocation is None:
-                return
-
-            sha = self._state.get_job(TaskType.BUILD)
-            assert sha is not None
+        sha = self._state.get_job(TaskType.BUILD)
+        if sha is None:
+            return
 
         try:
             commit = self._history_dict[sha]
-            print(f"Building: {sha} ({commit.date_str})  {allocation}")
+            print(f"Building: {sha} ({commit.date_str})  {core_request} workers")
             start_time = time.time()
             conda_env = build_clean(
                 sha,
@@ -314,16 +305,23 @@ class Runner:
                 return  # unbuildable
 
             new_env_path = os.path.join(BUILD_COMPLETED_ROOT, f"{commit.date_str}_{sha}")
-            shutil.move(conda_env, new_env_path)
+            shutil.copytree(conda_env, new_env_path, symlinks=True)
+            shutil.rmtree(conda_env)
+
             self._state.report_finished(TaskType.BUILD, sha, new_env_path)
             print(f"Build time: {sha} ({commit.date_str}) {time.time() - start_time:.0f} sec")
 
         finally:
             self._core_pool.release(allocation)
-            self._remaining_build_cores += core_request
 
     def measure(self):
-        sha = self._state.get_job(TaskType.TEST)
+        # sha = self._state.get_job(TaskType.TEST)
+
+        with self._lock:
+            sha = self._state.get_job(TaskType.TEST)
+            for _ in range(5):
+                self._state.get_job(TaskType.TEST)
+
         if sha is None:
             return
 
@@ -336,6 +334,8 @@ class Runner:
             "site-packages",
             "torch",
         )
+
+        print(f"Test begin: {sha} {commit.date_str}")
 
         if not os.path.exists(torch_path):
             print(f"TODO: {sha} {commit.date_str}")
@@ -375,19 +375,25 @@ class Runner:
             backport(torch_path)
 
             work_orders: List[WorkOrder] = []
+            may_fail, will_fail = get_exclude_sets(commit.date_str)
             for label, auto_labels, timer_args in self._benchmarks:
+                # fail_key = (
+                #     timer_args.language == Language.CPP,
+                #     auto_labels.autograd == AutogradMode.FORWARD_BACKWARD,
+                #     auto_labels.runtime == RuntimeMode.JIT,
+                #     label,
+                # )
+                # if fail_key in will_fail:
+                #     continue
+
                 work_orders.append(WorkOrder(
                     label=label,
                     auto_labels=auto_labels,
                     timer_args=timer_args,
                     source_cmd=f"source activate {conda_env}",
-                    timeout=360.0,
+                    timeout=400.0,
                     retries=3,
-                    allow_failure=benchmark_may_fail(
-                        is_cpp=timer_args.language == Language.CPP,
-                        is_jit=auto_labels.runtime == RuntimeMode.JIT,
-                        label=label,
-                    ),
+                    allow_failure=True, # (fail_key in may_fail),
                 ))
 
             benchmark_runner = BenchmarkRunner(
@@ -410,13 +416,14 @@ class Runner:
 
                     r = results[w]
                     simple_results.append(BenchmarkResult(
+                        w.label,
                         lang_to_str[w.auto_labels.language],
                         w.auto_labels.autograd.value,
                         w.auto_labels.runtime.value,
                         r.wall_time.median,
                         r.instructions.counts(denoise=True),
                     ))
-                    raw_results.append((w.auto_labels, r))
+                    raw_results.append((w.label, w.auto_labels, r))
 
                 simple_path = os.path.join(RUN_COMPLETED_ROOT, f"{commit.date_str}__{sha}.pkl")
                 raw_path = os.path.join(RUN_COMPLETED_ROOT, f"{commit.date_str}__{sha}_raw.pkl")
@@ -439,7 +446,10 @@ class Runner:
                 print(f"Failed: {sha} {e}")
 
             finally:
-                self._core_pool.unregister_benchmark_runner()
+                try:
+                    self._core_pool.unregister_benchmark_runner()
+                except BaseException:
+                    pass
 
         finally:
             clean_backport(torch_path)

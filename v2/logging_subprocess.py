@@ -1,8 +1,10 @@
 import datetime
 import json
 import os
+import re
 import shlex
 import subprocess
+import shutil
 import tempfile
 import textwrap
 import time
@@ -82,10 +84,6 @@ def now_str():
     return datetime.datetime.now().strftime(r"%Y_%m_%d__%H_%M_%S")
 
 
-def skip_line(l: str):
-    pass
-
-
 def call(
     args: str,
     shell: bool = False,
@@ -93,7 +91,7 @@ def call(
     env: Optional[Dict[str, str]] = None,
     check: bool = False,
     timeout: Optional[float] = None,
-    per_line_fn: Callable[[str], NoReturn] = skip_line,
+    per_line_fn: Optional[Callable[[str], NoReturn]] = None,
     conda_env: Optional[str] = None,
     task_name: Optional[str] = None,
     log_dir: Optional[str] = None,
@@ -160,10 +158,11 @@ def call(
 
         start_time = time.time()
         while True:
-            stdout_lines = stdout_f_read.read().decode("utf-8")
-            if stdout_lines:
-                for l in stdout_lines.splitlines(keepends=False):
-                    per_line_fn(l)
+            if per_line_fn:
+                stdout_lines = stdout_f_read.read().decode("utf-8")
+                if stdout_lines:
+                    for l in stdout_lines.splitlines(keepends=False):
+                        per_line_fn(l)
 
             retcode = proc.poll()
             if retcode is not None:
@@ -175,7 +174,7 @@ def call(
                 retcode = 1
                 break
 
-            time.sleep(0.001)
+            time.sleep(0.1)
 
         if retcode:
             cleanup_logs = False

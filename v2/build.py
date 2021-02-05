@@ -81,7 +81,7 @@ def make_conda_env(
         f"""
         conda config --env --add channels intel
         conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11 ipython
-        conda install -y -c conda-forge valgrind
+        conda install -y -c conda-forge valgrind glog
         """,
         shell=True,
         check=True,
@@ -112,8 +112,10 @@ def _build(
         git checkout {checkout}
         git clean -fd
 
-        # Sometimes QNNPack doesn't sync. I have no idea why.
-        rm -rf third_party/QNNPACK
+        # `git submodule sync` doesn't sync submodule submodules, which can
+        # cause build failures. So instead we just start over.
+        rm -rf third_party/*
+        git checkout third_party
         retry git submodule sync
 
         # History for XNNPack has changed, so this will fail in February/March
@@ -158,14 +160,16 @@ def _build(
             "USE_FBGEMM": "0",
             "USE_NNPACK": "0",
             "USE_QNNPACK": "0",
+            "USE_XNNPACK": "0",
             "BUILD_CAFFE2_OPS": "0",
             "REL_WITH_DEB_INFO": "1",
             "MKL_THREADING_LAYER": "GNU",
+            "USE_NUMA": "0",
             "MAX_JOBS": "" if max_jobs is None else str(max_jobs),
 
-            "CFLAGS": "-Wno-error=stringop-truncation",
+            "CFLAGS": f"-Wno-error=stringop-truncation",  # -I{conda_env}/include/",
         },
-        per_line_fn=per_line_fn if show_progress else lambda l: None,
+        per_line_fn=per_line_fn if show_progress else None,
         conda_env=conda_env,
         task_name="Build PyTorch",
         log_dir=BUILD_LOG_ROOT,
@@ -181,8 +185,7 @@ def _build(
         )
 
     if retcode:
-        import pdb
-        pdb.set_trace()
+        # print(f"Debug unbuildable {checkout}  {conda_env}")
         mark_unbuildable(checkout)
         shutil.rmtree(conda_env)
 
@@ -237,6 +240,7 @@ def build_clean(
         repo_path = os.path.join(BUILD_IN_PROGRESS_ROOT, f"pytorch_{uuid.uuid4()}")
         shutil.copytree(REF_REPO_ROOT, repo_path)
         conda_env = make_conda_env(build_cfg=build_cfg)
+        print(f"Conda env: {checkout} {conda_env}")
         retcode = _build(
             repo_path,
             checkout,
@@ -255,5 +259,8 @@ def build_clean(
         raise
 
     finally:
+        # if not retcode and os.path.exists(repo_path):
+        #     shutil.rmtree(repo_path)
+
         if os.path.exists(repo_path):
             shutil.rmtree(repo_path)

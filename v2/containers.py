@@ -37,6 +37,7 @@ class History:
 
 @dataclasses.dataclass(frozen=True)
 class BenchmarkResult:
+    label: Tuple[str, ...]
     language: str
     autograd: str
     runtime: str

@@ -1399,7 +1399,7 @@ def _make_report(threshold_multiplier=1, name="test"):
 def make_report():
     # _make_report(threshold_multiplier=1, name="bisect_report")
     # _make_report(threshold_multiplier=1.5, name="bisect_report_strict")
-    _make_report(threshold_multiplier=1, name="bisect_report_debug")
+    _make_report(threshold_multiplier=0.3, name="bisect_report_debug")
 
 
 def debug():
@@ -1411,56 +1411,9 @@ def debug():
     )
 
     runner = Runner(builder)
-    print(len(runner.state.built), len(runner.state.finished))
-
-    first_sha = None
-    history = builder.get_history_since("2020-07-01")
-    for i in history:
-        sha = i[0]
-        if sha in runner.state.finished:
-            first_sha = first_sha or sha
-            last_sha = sha
-
-    for i in history:
-        if i[0] in (first_sha, last_sha):
-            print(i)
-
-    with open(runner.state.finished[first_sha][1], "rb") as f:
-        old_results = pickle.load(f)
-
-    with open(runner.state.finished[last_sha][1], "rb") as f:
-        new_results = pickle.load(f)
-
-    import json
-    import statistics
-    results = []
-    for (_, stmt), old_py_cts, new_py_cts, old_cpp_cts, new_cpp_cts in zip(_TASKS, old_results["Python"], new_results["Python"], old_results["C++"], new_results["C++"]):
-        results.append(["Python", stmt, [statistics.median(old_py_cts), statistics.median(new_py_cts)]])
-
-        cpp_stmt = CPP_ANALOGS.get(stmt)
-        if cpp_stmt is None:
-            results.append(["C++", "No analog tested", [None, None]])
-        else:
-            results.append(["C++", cpp_stmt, [statistics.median(old_cpp_cts), statistics.median(new_cpp_cts)]])
-
-    rel_diffs = []
-    for lang, stmt, (c_old, c_new) in results:
-        if not c_old:
-            continue
-        stmt = stmt if isinstance(stmt, str) else " \\n ".join(stmt)
-        print(f"{lang:<8} {(c_new - c_old) / c_new * 100:>8.1f}%   {stmt}")
-        rel_diffs.append((c_new - c_old) / c_new)
-    print(statistics.mean(rel_diffs))
-
-    # results = {"Old SHA": first_sha, "New SHA": last_sha, "Counts": results}
-    # with open("/mnt/shared/taylorrobie/public_html/that_which_is_measured_improves.json", "wt") as f:
-    #     json.dump(results, f, indent=4)
 
 
-    # runner.timing_loop()
-
-
-def main():
+def _main():
     builder = build_pytorch.PytorchBuildHelper(
         root_dir=WORKSPACE_ROOT,
         clean=False,
@@ -1474,6 +1427,14 @@ def main():
 
     runner = Runner(builder)
     runner.loop()
+
+
+def main():
+    while True:
+        _main()
+        print("Sleeping.")
+        time.sleep(24 * 60 * 60)
+        print("Done sleeping.")
 
 
 _MODES = {
