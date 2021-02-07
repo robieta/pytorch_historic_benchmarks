@@ -79,9 +79,17 @@ def make_conda_env(
 
     call(
         f"""
+        echo ADD_INTEL
         conda config --env --add channels intel
+
+        echo MAIN_INSTALL
         conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11 ipython
-        conda install -y -c conda-forge valgrind glog
+
+        echo GLOG_INSTALL
+        conda install -y -c conda-forge glog
+
+        echo INSTALL_VALGRIND
+        conda install -y -c conda-forge valgrind
         """,
         shell=True,
         check=True,
@@ -105,10 +113,16 @@ def _build(
     max_jobs: Optional[int],
 ) -> int:
     assert setup_mode in ("develop", "install")
+
+    no_xnnpack = '-c submodule."third_party/XNNPACK".update=none'
+    no_nervanagpu = '-c submodule."third_party/nervanagpu".update=none'
     call(
         f"""
         retry () {{ $* || (sleep 1 && $*) || (sleep 2 && $*); }}
 
+        git checkout .
+        git clean -fd
+        git checkout .
         git checkout {checkout}
         git clean -fd
 
@@ -119,12 +133,24 @@ def _build(
         retry git submodule sync
 
         # History for XNNPack has changed, so this will fail in February/March
-        retry git -c submodule."third_party/XNNPACK".update=none submodule update --init --recursive
-        retry git submodule update --init --recursive || true
+        retry git {no_xnnpack} {no_nervanagpu} submodule update --init --recursive
         """,
         shell=True,
         cwd=repo_path,
         check=True,
+        conda_env=conda_env,
+        task_name="(pre) Build PyTorch",
+        log_dir=BUILD_LOG_ROOT,
+    )
+
+    call(
+        f"""
+        retry () {{ $* || (sleep 1 && $*) || (sleep 2 && $*); }}
+        retry git submodule update --init --recursive
+        """,
+        shell=True,
+        cwd=repo_path,
+        check=False,
         conda_env=conda_env,
         task_name="(pre) Build PyTorch",
         log_dir=BUILD_LOG_ROOT,
@@ -240,7 +266,6 @@ def build_clean(
         repo_path = os.path.join(BUILD_IN_PROGRESS_ROOT, f"pytorch_{uuid.uuid4()}")
         shutil.copytree(REF_REPO_ROOT, repo_path)
         conda_env = make_conda_env(build_cfg=build_cfg)
-        print(f"Conda env: {checkout} {conda_env}")
         retcode = _build(
             repo_path,
             checkout,
@@ -252,6 +277,7 @@ def build_clean(
             nice,
             max_jobs,
         )
+
         return None if retcode else conda_env
 
     except KeyboardInterrupt:
@@ -259,8 +285,5 @@ def build_clean(
         raise
 
     finally:
-        # if not retcode and os.path.exists(repo_path):
-        #     shutil.rmtree(repo_path)
-
         if os.path.exists(repo_path):
             shutil.rmtree(repo_path)
