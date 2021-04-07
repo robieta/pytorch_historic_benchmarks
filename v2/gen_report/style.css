@@ -1,0 +1,126 @@
+.page_style {
+    background-color: Black;
+    color: WhiteSmoke;
+}
+
+.control-table td {
+    vertical-align: top;
+}
+
+.graph-control-button {
+    background-color: #555555;
+    float: left;
+    border: 1px solid grey;
+    outline: none;
+    cursor: pointer;
+    padding: 15px 15px;
+    margin: 5px 5px;
+}
+
+.graph-control-button.active {
+    background-color: darkgrey;
+    padding: 19px 19px;
+    margin: 1px 1px;
+}
+
+.table_control_button_hidden {
+    display: none;
+}
+
+.table_control_button {
+    background-color: #555555;
+    float: left;
+    border: 1px solid grey;
+    outline: none;
+    cursor: pointer;
+    padding: 25px 25px;
+    transition: 0.3s;
+    font-size: 16px;
+}
+
+.data-table {
+    border-collapse: collapse;
+}
+
+.data-table th {
+    display: table-cell;
+    height: 270px;
+    vertical-align: bottom;
+    text-align: left;
+    line-height: 1;
+}
+
+.rotated-header-container {
+    width: 40px;
+}
+
+.rotated-header-content {
+    width: 350px;
+    transform-origin: bottom left;
+    transform: translateX(54px) rotate(-45deg);
+    padding-bottom: 10px;
+    overflow: visible;
+}
+
+.top-level-label {
+    border-left: 3px solid grey;
+    border-right: 3px solid grey;
+    border-bottom: 3px solid grey;
+    border-top: 1px dashed grey;
+    text-align: center;
+    line-height: 2;
+}
+
+.solid-bottom {
+    border-bottom: 3px solid grey;
+}
+
+.solid-right {
+    border-right: 3px solid grey;
+}
+
+.dashed-right {
+    border-right: 1px dashed grey;
+}
+
+.data-row {
+    height: 30px;
+}
+
+.spacer {
+    border-bottom: 1px dashed grey;
+}
+
+.col-0 {
+    min-width: 160px;
+    text-align:right;
+}
+
+.col-1 {
+    min-width: 200px;
+    text-align:right;
+    word-spacing: 1ch;
+}
+
+.col-2 {
+    min-width: 120px;
+    text-align:left;
+    padding-left: 20px;
+}
+
+.col-3 {
+    min-width: 300px;
+    max-width: 300px;
+    overflow: hidden;
+    padding-left: 20px;
+}
+
+.col-4 {
+    min-width: 120px;
+}
+
+.col {
+    min-width: 40px;
+    padding: 4px;
+    text-align: right;
+}

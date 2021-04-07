@@ -20,6 +20,10 @@ _CONDA_ENV_TEMPLATE = "env_{n:0>2}"
 _MAX_ACTIVE_ENVS = 50
 
 
+class OutOfEnvsError(Exception):
+    pass
+
+
 class _Unbuildable:
     def __init__(self):
         self._known_unbuildable = None
@@ -44,9 +48,18 @@ class _Unbuildable:
                 f.write(f"{checkout}\n")
         self._known_unbuildable.add(checkout)
 
+    def reset_unbuildable(self, checkout: str) -> None:
+        self._lazy_init()
+        MUTATION_LOCK.get()
+        if checkout in self._known_unbuildable:
+            self._known_unbuildable.remove(checkout)
+            with open(CANNOT_BUILD, "wt") as f:
+                f.write("\n".join(self._known_unbuildable) + "\n")
+
 _UnbuildableSingleton = _Unbuildable()
 check_unbuildable = _UnbuildableSingleton.check
 mark_unbuildable = _UnbuildableSingleton.update
+reset_unbuildable = _UnbuildableSingleton.reset_unbuildable
 
 
 def make_conda_env(
@@ -54,51 +67,59 @@ def make_conda_env(
     build_cfg: BuildCfg = BuildCfg(),
 ):
     MUTATION_LOCK.get()
-    with _NAMESPACE_LOCK:
-        if env_path is None:
-            active_envs = set(os.listdir(BUILD_IN_PROGRESS_ROOT))
-            for i in range(_MAX_ACTIVE_ENVS):
-                env_name = _CONDA_ENV_TEMPLATE.format(n=i)
-                if env_name not in active_envs:
-                    break
+    cleanup = (env_path is None)
+    success = False
+    try:
+        with _NAMESPACE_LOCK:
+            if env_path is None:
+                active_envs = set(os.listdir(BUILD_IN_PROGRESS_ROOT))
+                for i in range(_MAX_ACTIVE_ENVS):
+                    env_name = _CONDA_ENV_TEMPLATE.format(n=i)
+                    if env_name not in active_envs:
+                        break
+                else:
+                    raise OutOfEnvsError("Failed to create env. Too many already exist.")
+
+                env_path = os.path.join(BUILD_IN_PROGRESS_ROOT, env_name)
             else:
-                raise ValueError("Failed to create env. Too many already exist.")
+                env_name = "custom"
 
-            env_path = os.path.join(BUILD_IN_PROGRESS_ROOT, env_name)
-        else:
-            env_name = "custom"
+            mkl_spec = f"=={build_cfg.mkl_version}" if build_cfg.mkl_version else ""
+            call(
+                f"conda create --no-default-packages -y --prefix {env_path} python={build_cfg.python_version}",
+                shell=True,
+                check=True,
+                task_name=f"Conda env creation: {env_name}",
+                log_dir=BUILD_LOG_ROOT,
+            )
 
-        mkl_spec = f"=={build_cfg.mkl_version}" if build_cfg.mkl_version else ""
         call(
-            f"conda create --no-default-packages -y --prefix {env_path} python={build_cfg.python_version}",
+            f"""
+            echo ADD_INTEL
+            conda config --env --add channels intel
+
+            echo MAIN_INSTALL
+            conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11 ipython
+
+            echo GLOG_INSTALL
+            conda install -y -c conda-forge glog
+
+            echo INSTALL_VALGRIND
+            conda install -y -c conda-forge valgrind
+            """,
             shell=True,
             check=True,
-            task_name=f"Conda env creation: {env_name}",
+            task_name=f"Conda env install: {env_name}",
+            conda_env=env_path,
             log_dir=BUILD_LOG_ROOT,
         )
 
-    call(
-        f"""
-        echo ADD_INTEL
-        conda config --env --add channels intel
+        success = True
+        return env_path
 
-        echo MAIN_INSTALL
-        conda install -y numpy ninja pyyaml mkl{mkl_spec} mkl-include setuptools cmake cffi hypothesis typing_extensions pybind11 ipython
-
-        echo GLOG_INSTALL
-        conda install -y -c conda-forge glog
-
-        echo INSTALL_VALGRIND
-        conda install -y -c conda-forge valgrind
-        """,
-        shell=True,
-        check=True,
-        task_name=f"Conda env install: {env_name}",
-        conda_env=env_path,
-        log_dir=BUILD_LOG_ROOT,
-    )
-
-    return env_path
+    finally:
+        if cleanup and not success and env_path is not None and os.path.exists(env_path):
+            shutil.rmtree(env_path)
 
 
 def _build(
@@ -114,6 +135,7 @@ def _build(
 ) -> int:
     assert setup_mode in ("develop", "install")
 
+    no_fbgemm = '-c submodule."third_party/fbgemm".update=none'
     no_xnnpack = '-c submodule."third_party/XNNPACK".update=none'
     no_nervanagpu = '-c submodule."third_party/nervanagpu".update=none'
     call(
@@ -133,7 +155,7 @@ def _build(
         retry git submodule sync
 
         # History for XNNPack has changed, so this will fail in February/March
-        retry git {no_xnnpack} {no_nervanagpu} submodule update --init --recursive
+        retry git {no_fbgemm} {no_xnnpack} {no_nervanagpu} submodule update --init --recursive
         """,
         shell=True,
         cwd=repo_path,
@@ -186,14 +208,14 @@ def _build(
             "USE_FBGEMM": "0",
             "USE_NNPACK": "0",
             "USE_QNNPACK": "0",
+            "USE_PYTORCH_QNNPACK": "0",
             "USE_XNNPACK": "0",
             "BUILD_CAFFE2_OPS": "0",
             "REL_WITH_DEB_INFO": "1",
             "MKL_THREADING_LAYER": "GNU",
             "USE_NUMA": "0",
             "MAX_JOBS": "" if max_jobs is None else str(max_jobs),
-
-            "CFLAGS": f"-Wno-error=stringop-truncation",  # -I{conda_env}/include/",
+            "CFLAGS": f"-Wno-error=stringop-truncation",
         },
         per_line_fn=per_line_fn if show_progress else None,
         conda_env=conda_env,
@@ -211,7 +233,6 @@ def _build(
         )
 
     if retcode:
-        # print(f"Debug unbuildable {checkout}  {conda_env}")
         mark_unbuildable(checkout)
         shutil.rmtree(conda_env)
 
@@ -227,6 +248,7 @@ def build_benchmark_env():
         shutil.rmtree(BENCHMARK_ENV, ignore_errors=True)
 
     make_conda_env(env_path=BENCHMARK_ENV, build_cfg=BuildCfg())
+    call("pip install yattag", shell=True, conda_env=BENCHMARK_ENV)
 
     # By default, build will try to take over all cores. However, this can
     # lead to OOM during some of the memory-intensive parts of compilation.
@@ -262,6 +284,8 @@ def build_clean(
         print(f"{checkout} is known to be unbuildable.")
         return
 
+    conda_env = None
+    retcode = 1
     try:
         repo_path = os.path.join(BUILD_IN_PROGRESS_ROOT, f"pytorch_{uuid.uuid4()}")
         shutil.copytree(REF_REPO_ROOT, repo_path)
@@ -285,5 +309,8 @@ def build_clean(
         raise
 
     finally:
+        if retcode and conda_env is not None and os.path.exists(conda_env):
+            shutil.rmtree(conda_env)
+
         if os.path.exists(repo_path):
             shutil.rmtree(repo_path)

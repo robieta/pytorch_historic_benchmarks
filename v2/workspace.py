@@ -11,18 +11,28 @@ RUNNER_STATE_ROOT = os.path.join(WORKSPACE_ROOT, "runner_state")
 BUILD_LOG_ROOT = os.path.join(WORKSPACE_ROOT, "build__logs")
 BUILD_IN_PROGRESS_ROOT = os.path.join(WORKSPACE_ROOT, "build__in_progress")
 BUILD_COMPLETED_ROOT = os.path.join(WORKSPACE_ROOT, "build__completed")
-BUILD_ARCHIVED_ROOT = os.path.join(WORKSPACE_ROOT, "build__archived")
 CANNOT_BUILD = os.path.join(WORKSPACE_ROOT, "cannot_build.txt")
 
 RUN_IN_PROGRESS_ROOT = os.path.join(WORKSPACE_ROOT, "run__in_progress")
 RUN_LOG_ROOT = os.path.join(WORKSPACE_ROOT, "run__logs")
 RUN_COMPLETED_ROOT = os.path.join(WORKSPACE_ROOT, "run__completed")
 
+# manifoldfs manifold.blobstore pytorch_historic_bisect_artifacts "$(pwd)/overflow"
+OVERFLOW_ROOT = os.path.join(WORKSPACE_ROOT, "overflow")
+
 # touch this file to stop the build/test loop.
 STOP_FILE = os.path.join(WORKSPACE_ROOT, "stop")
 
 # touch this file to stop the build/test loop.
 PDB_FILE = os.path.join(WORKSPACE_ROOT, "pdb")
+
+# touch this file to tell the runner to run the debug script.
+CALL_DEBUG_FILE = os.path.join(WORKSPACE_ROOT, "debug")
+
+# touch this file to stop allocations until it is removed.
+THROTTLE_FILE = os.path.join(WORKSPACE_ROOT, "throttle")
+
+STATUS_FILE = os.path.join(WORKSPACE_ROOT, "status.txt")
 
 REF_REPO_ROOT = os.path.join(WORKSPACE_ROOT, "pytorch")
 BENCHMARK_BRANCH_NAME = "gh/taylorrobie/timer_ci_prep"
@@ -32,7 +42,7 @@ BENCHMARK_ENV_BUILT = os.path.join(BENCHMARK_ENV, "BENCHMARK_ENV_BUILT")
 
 DATE_FMT = "%Y-%m-%d"
 SWEEP_START = "2018-06-01"
-SWEEP_CADENCE = 3  # days
+SWEEP_CADENCE = 1  # day
 
 TIDY_LOCATIONS = (
     BUILD_LOG_ROOT,
@@ -73,7 +83,6 @@ def make_dirs():
         BUILD_LOG_ROOT,
         BUILD_IN_PROGRESS_ROOT,
         BUILD_COMPLETED_ROOT,
-        BUILD_ARCHIVED_ROOT,
         RUN_IN_PROGRESS_ROOT,
         RUN_LOG_ROOT,
         RUN_COMPLETED_ROOT,

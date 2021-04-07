@@ -1,7 +1,7 @@
 import collections
 import dataclasses
 import datetime
-from typing import Deque, Generic, Iterable, Set, Tuple, TypeVar
+from typing import Deque, Generic, Iterable, Optional, Set, Tuple, TypeVar
 
 from v2.workspace import DATE_FMT
 
@@ -14,6 +14,11 @@ class UniqueDeque(Generic[T]):
 
     def append(self, item: T) -> None:
         if item not in self._contents:
+            self._contents.add(item)
+            self._queue.append(item)
+
+    def force_append(self, item: T) -> None:
+        if item not in self._queue:
             self._contents.add(item)
             self._queue.append(item)
 
@@ -75,8 +80,14 @@ class BenchmarkResult:
     language: str
     autograd: str
     runtime: str
+    num_threads: int
+
     wall_time: float
     instructions: int
+
+    @property
+    def key(self):
+        return (self.label, self.language, self.autograd, self.runtime, self.num_threads)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,3 +95,12 @@ class BenchmarkResults:
     sha: str
     conda_env: str
     values: Tuple[BenchmarkResult, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ResultRange:
+    lower_commit: Commit
+    upper_commit: Commit
+    intermediate_commits: Tuple[Commit, ...]
+    lower_results: Optional[BenchmarkResults]
+    upper_results: Optional[BenchmarkResults]

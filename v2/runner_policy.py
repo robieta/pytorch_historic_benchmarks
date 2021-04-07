@@ -1,11 +1,13 @@
 import datetime
 import enum
 import multiprocessing
+import os
 import threading
 import time
 from typing import Optional, Tuple
 
-from v2.workspace import DATE_FMT
+from v2.runner_interface import CorePool
+from v2.workspace import DATE_FMT, THROTTLE_FILE
 
 
 NUM_CORES: int = multiprocessing.cpu_count()
@@ -39,8 +41,8 @@ class SharedCorePool:
         self._cost = {}
         self._max_total_cores = NUM_CORES - POOL_SLACK
         self._max_cores_by_type = {
-            TaskType.BUILD: int(0.75 * NUM_CORES),
-            TaskType.MEASURE: int(0.75 * NUM_CORES),
+            TaskType.BUILD: int(0.8 * NUM_CORES),
+            TaskType.MEASURE: int(0.6 * NUM_CORES),
             TaskType.ARCHIVE: NUM_CORES,
         }
         self._allocations_by_type = {
@@ -49,7 +51,7 @@ class SharedCorePool:
             TaskType.ARCHIVE: 0,
         }
         self._allocation_stagger = {
-            TaskType.BUILD: 120,
+            TaskType.BUILD: 180,
             TaskType.MEASURE: 1,
             TaskType.ARCHIVE: 0,
         }
@@ -59,6 +61,9 @@ class SharedCorePool:
             [f"0-{self._max_total_cores},{i}-{i}" for i in range(self._max_total_cores)]
         )
         self._allocating_thread = {}
+
+        # We can't trust all versions to respect `set_num_threads`.
+        self._measure_pool = CorePool()
 
     @property
     def allocated(self):
@@ -79,28 +84,42 @@ class SharedCorePool:
         thread_id = threading.get_ident()
         t: TaskType = self._thread_type[thread_id]
 
+        if time.time() - self._last_allocation_by_type[t] < self._allocation_stagger[t]:
+            return
+
+        if self.allocated + n > self._max_total_cores:
+            return
+
+        if self._allocations_by_type[t] + n > self._max_cores_by_type[t]:
+            return
+
+        if os.path.exists(THROTTLE_FILE):
+            return
+
         with self._lock:
-            if time.time() - self._last_allocation_by_type[t] < self._allocation_stagger[t]:
-                return
+            if t == TaskType.MEASURE:
+                allocation = self._measure_pool.reserve(n)
+            else:
+                allocation = self._job_slots.pop()
 
-            if self.allocated + n > self._max_total_cores:
-                return
+            if allocation is not None:
+                self._cost[allocation] = n
+                self._allocations_by_type[t] += n
+                self._last_allocation_by_type[t] = time.time()
+                self._allocating_thread[allocation] = thread_id
+                self._log.append(("reserve", n, allocation, thread_id, t))
 
-            if self._allocations_by_type[t] + n > self._max_cores_by_type[t]:
-                return
-
-            allocation = self._job_slots.pop()
-            self._cost[allocation] = n
-            self._allocations_by_type[t] += n
-            self._last_allocation_by_type[t] = time.time()
-            self._allocating_thread[allocation] = thread_id
-            self._log.append(("reserve", n, allocation, thread_id, t))
             return allocation
 
     def release(self, key: str) -> None:
         thread_id = self._allocating_thread.pop(key)
         t = self._thread_type[thread_id]
         self._log.append(("release", key, thread_id, threading.get_ident(), t))
-        self._job_slots.append(key)
+
+        if t == TaskType.MEASURE:
+            self._measure_pool.release(key)
+        else:
+            self._job_slots.append(key)
+
         n = self._cost.pop(key)
         self._allocations_by_type[t] -= n

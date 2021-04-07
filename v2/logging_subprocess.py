@@ -14,6 +14,11 @@ import uuid
 from v2.workspace import RUN_IN_PROGRESS_ROOT
 
 
+class NoUserException(Exception):
+    # When SSSD fails, so does git checkout. (Since there is no user for credentials.)
+    pass
+
+
 # Copied from: https://github.com/python/cpython/blob/1ed83adb0e95305af858bd41af531e487f54fee7/Lib/subprocess.py#L529
 def list2cmdline(seq):
     """
@@ -180,6 +185,10 @@ def call(
             cleanup_logs = False
             write_to_progress(f"Cmd failed. Logs: {summary}")
             if check:
+                with open(stderr, "rt") as f:
+                    if "No user exists for uid" in f.read():
+                        raise NoUserException(f"Cmd failed. Logs: {summary}")
+
                 raise ValueError(f"Cmd failed. Logs: {summary}")
 
         return retcode
