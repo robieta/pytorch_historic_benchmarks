@@ -2,10 +2,19 @@ from v2.runner import Runner
 
 
 def make_report(self: Runner):
+    # import importlib
+    # import v2.report
+    # importlib.reload(v2.report)
+    # v2.report.make_report(self)
+
     import importlib
-    import v2.report
-    importlib.reload(v2.report)
-    v2.report.make_report(self)
+    import v2.write_report
+    importlib.reload(v2.write_report)
+    v2.write_report.generate(
+        name="test",
+        result_ranges=self._group_ranges(split_unbuildable=False)[::-1],
+        history=self._history,
+    )
 
 
 
@@ -35,7 +44,7 @@ def debug_fn(r: Runner):
 
     try:
         make_report(r)
-        archive(r)
+        # archive(r)
     except:
         traceback.print_tb(sys.exc_info()[2])
         raise

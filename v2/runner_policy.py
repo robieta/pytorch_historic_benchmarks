@@ -6,18 +6,17 @@ import threading
 import time
 from typing import Optional, Tuple
 
-from v2.runner_interface import CorePool
 from v2.workspace import DATE_FMT, THROTTLE_FILE
 
 
 NUM_CORES: int = multiprocessing.cpu_count()
 POOL_SLACK: int = 8
 BUILD_WORKERS = 12  # tar takes a long time, but only takes a single core.
-TEST_WORKERS = 3
+TEST_WORKERS = 5
 
 
 # Currently only support DevBig
-assert NUM_CORES in (80,)
+assert NUM_CORES in (56, 80)
 
 
 class TaskType(enum.Enum):
@@ -28,6 +27,9 @@ class TaskType(enum.Enum):
 
 class SharedCorePool:
     def __init__(self):
+        # For ETA estimation.
+        self._num_cores = NUM_CORES
+
         self._log = []
         self._thread_type = {}
         self._lock = threading.Lock()
@@ -41,8 +43,8 @@ class SharedCorePool:
         self._cost = {}
         self._max_total_cores = NUM_CORES - POOL_SLACK
         self._max_cores_by_type = {
-            TaskType.BUILD: int(0.8 * NUM_CORES),
-            TaskType.MEASURE: int(0.6 * NUM_CORES),
+            TaskType.BUILD: int(0.2 * NUM_CORES),
+            TaskType.MEASURE: int(0.4 * NUM_CORES),
             TaskType.ARCHIVE: NUM_CORES,
         }
         self._allocations_by_type = {
@@ -61,9 +63,6 @@ class SharedCorePool:
             [f"0-{self._max_total_cores},{i}-{i}" for i in range(self._max_total_cores)]
         )
         self._allocating_thread = {}
-
-        # We can't trust all versions to respect `set_num_threads`.
-        self._measure_pool = CorePool()
 
     @property
     def allocated(self):
@@ -97,17 +96,13 @@ class SharedCorePool:
             return
 
         with self._lock:
-            if t == TaskType.MEASURE:
-                allocation = self._measure_pool.reserve(n)
-            else:
-                allocation = self._job_slots.pop()
+            allocation = self._job_slots.pop()
 
-            if allocation is not None:
-                self._cost[allocation] = n
-                self._allocations_by_type[t] += n
-                self._last_allocation_by_type[t] = time.time()
-                self._allocating_thread[allocation] = thread_id
-                self._log.append(("reserve", n, allocation, thread_id, t))
+            self._cost[allocation] = n
+            self._allocations_by_type[t] += n
+            self._last_allocation_by_type[t] = time.time()
+            self._allocating_thread[allocation] = thread_id
+            self._log.append(("reserve", n, allocation, thread_id, t))
 
             return allocation
 
@@ -116,10 +111,6 @@ class SharedCorePool:
         t = self._thread_type[thread_id]
         self._log.append(("release", key, thread_id, threading.get_ident(), t))
 
-        if t == TaskType.MEASURE:
-            self._measure_pool.release(key)
-        else:
-            self._job_slots.append(key)
-
+        self._job_slots.append(key)
         n = self._cost.pop(key)
         self._allocations_by_type[t] -= n

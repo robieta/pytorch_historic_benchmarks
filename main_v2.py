@@ -1,4 +1,7 @@
-from v2 import runner_interface
+import os
+os.environ["BENCHMARK_USE_DEV_SHM"] = "1"
+os.environ["USE_NOISE_POLICE"] = "1"
+
 from v2 import runner
 
 

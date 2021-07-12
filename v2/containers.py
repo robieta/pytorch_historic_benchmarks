@@ -1,7 +1,9 @@
 import collections
 import dataclasses
 import datetime
+import statistics
 from typing import Deque, Generic, Iterable, Optional, Set, Tuple, TypeVar
+
 
 from v2.workspace import DATE_FMT
 
@@ -82,12 +84,20 @@ class BenchmarkResult:
     runtime: str
     num_threads: int
 
-    wall_time: float
-    instructions: int
+    wall_time: Tuple[float, ...]
+    instructions: Tuple[int, ...]
 
     @property
     def key(self):
         return (self.label, self.language, self.autograd, self.runtime, self.num_threads)
+
+    @property
+    def t(self):
+        return statistics.median(self.wall_time)
+
+    @property
+    def ct(self):
+        return statistics.median(self.instructions)
 
 
 @dataclasses.dataclass(frozen=True)

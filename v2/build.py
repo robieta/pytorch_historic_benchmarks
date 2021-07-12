@@ -227,6 +227,9 @@ def _build(
         retcode = call(
             'python -c "import torch"',
             shell=True,
+            env={
+                "MKL_THREADING_LAYER": "GNU",
+            },
             conda_env=conda_env,
             task_name="Test PyTorch",
             log_dir=BUILD_LOG_ROOT,

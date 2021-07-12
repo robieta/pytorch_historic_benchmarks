@@ -7,9 +7,10 @@ import textwrap
 from yattag import Doc, indent
 
 
-DOC_NAME = "test"
-# DOC_NAME = "wall_v2_preview"
-REPORT_ROOT = f"/mnt/public/{os.getenv('USER')}/{DOC_NAME}"
+# DOC_NAME = "test"
+DOC_NAME = "wall_v4_preview"
+REPORT_ROOT = f"/home/{os.getenv('USER')}/persistent/public-90d/public_html/{DOC_NAME}"
+print(REPORT_ROOT)
 REPORT_FILE = os.path.join(REPORT_ROOT, f"{DOC_NAME}.html")
 REPORT_URL_ROOT = f"https://home.fburl.com/~{os.getenv('USER')}/{DOC_NAME}"
 ARTIFACT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -147,7 +148,6 @@ def col_reprs(cols, table_format=False):
 def gen_controls(doc, tag, top_level_labels, cols, label_indices, row_counts):
     col_group_bounds = {i[-1] for i in label_indices.values()}
     columns = (
-        # ("s", SIGNIFICANCE_LEVELS, 1),
         ("l", LANGUAGES, 1),
         ("c", top_level_labels.keys(), 2),
     )
@@ -214,7 +214,7 @@ def gen_controls(doc, tag, top_level_labels, cols, label_indices, row_counts):
                     name="table_threshold",
                     id="table_threshold",
                     type="text",
-                    value="0.5",
+                    value="1.0",
                     onchange="page_start = 0; update()",
                 )
 
@@ -235,7 +235,7 @@ def gen_controls(doc, tag, top_level_labels, cols, label_indices, row_counts):
 
 
 
-def gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, result_ranges, row_classification_indicies, i_to_label_index):
+def gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, result_ranges, i_to_label_index):
     tab_keys = list(TABS.keys())
     right_map = {k: v for k, v in zip(tab_keys, tab_keys[1:] + tab_keys[:1])}
     metadata = {
@@ -274,15 +274,11 @@ def gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, res
         if grid is None:
             continue
 
-        si = row_classification_indicies.get(id(result_range), None)
-        if si is None:
-            continue
-
         c0: Commit = result_range.lower_commit
         c1: Commit = result_range.upper_commit
         is_range = bool(result_range.intermediate_commits)
 
-        row = [si]
+        row = [None]  # Used to be si
         if bool(result_range.intermediate_commits):
             row.extend([
                 f"{sha_to_url(c0.sha)} - {sha_to_url(c1.sha)}",
@@ -314,7 +310,7 @@ def gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, res
     return table_data
 
 
-def write_static_table(doc, tag, table_data, cols, top_level_labels, i_to_label_index, label_indices, result_ranges, row_deltas, row_classification_indicies):
+def write_static_table(doc, tag, table_data, cols, top_level_labels, i_to_label_index, label_indices, result_ranges, row_deltas):
     col_group_bounds = {i[-1] for i in label_indices.values()}
     with tag("table", klass="data-table"):
         with tag("thead", id="static-thead"):
@@ -398,9 +394,9 @@ def write_static_table(doc, tag, table_data, cols, top_level_labels, i_to_label_
                             pass
 
 
-def write_report(history, cols, top_level_labels, grid_pos, row_counts, result_ranges, row_deltas, row_classification_indicies):
+def write_report(history, cols, top_level_labels, grid_pos, row_counts, result_ranges, row_deltas):
     if not os.path.exists(REPORT_ROOT):
-        os.makedirs(REPORT_ROOT)
+        os.makedirs(REPORT_ROOT, exist_ok=True)
 
     for i in os.listdir(REPORT_ROOT):
         os.remove(os.path.join(REPORT_ROOT, i))
@@ -432,7 +428,7 @@ def write_report(history, cols, top_level_labels, grid_pos, row_counts, result_r
         with tag("head"):
             add_source("tabs.css")
             add_source("style.css")
-            table_data = gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, result_ranges, row_classification_indicies, i_to_label_index)
+            table_data = gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, result_ranges, i_to_label_index)
             add_source("style.js")
 
         with tag("body", klass="page_style", onload="initPage();"):
@@ -519,7 +515,6 @@ def write_report(history, cols, top_level_labels, grid_pos, row_counts, result_r
                     label_indices,
                     result_ranges,
                     row_deltas,
-                    row_classification_indicies
                 )
 
     with open(REPORT_FILE, "wt") as f:

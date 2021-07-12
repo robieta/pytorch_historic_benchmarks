@@ -16,16 +16,16 @@ sys.path.insert(0, CI_ROOT_PATH)
 #   We have to use normal imports rather than importlib, because the latter
 #   can result in multiple copies of enums.
 from core.api import AutogradMode, RuntimeMode
-from core.utils import unpack
+from core.expand import materialize
 from definitions.standard import BENCHMARKS
-from execution.cores import CorePool
+from execution.runner import CorePool
 from execution.runner import Runner as BenchmarkRunner
 from execution.work import WorkOrder
 
 assert sys.path.pop(0) == CI_ROOT_PATH
 
 sys.path.insert(0, BENCHMARK_BRANCH_ROOT)
-from torch.utils.benchmark.utils.historic.patch import backport, clean_backport
+from torch.utils.benchmark.utils.historic.patch import backport
 assert sys.path.pop(0) == BENCHMARK_BRANCH_ROOT
 
 
@@ -34,5 +34,5 @@ def get_benchmarks():
     """This will write artifacts, so we guard it in a function."""
     global _BENCHMARKS
     if _BENCHMARKS is None:
-        _BENCHMARKS = unpack(BENCHMARKS)
+        _BENCHMARKS = materialize(BENCHMARKS)
     return _BENCHMARKS

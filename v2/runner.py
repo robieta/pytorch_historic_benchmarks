@@ -14,14 +14,16 @@ import textwrap
 import threading
 import time
 import traceback
-from typing import Dict, Generic, List, Optional, Tuple
+from typing import Dict, Generic, List, Optional, Set, Tuple
 
+import numpy as np
 from torch.utils.benchmark import CallgrindStats, Language, Measurement
 
+from v2.bisection import bisection_step
 from v2.build import build_clean, check_unbuildable, mark_unbuildable, OutOfEnvsError
 from v2.containers import BenchmarkResult, BenchmarkResults, Commit, ResultRange, UniqueDeque
 from v2 import init_pytorch
-from v2.runner_interface import backport, clean_backport, get_benchmarks, AutogradMode, BenchmarkRunner, RuntimeMode, WorkOrder
+from v2.runner_interface import backport, get_benchmarks, AutogradMode, BenchmarkRunner, RuntimeMode, WorkOrder
 from v2.logging_subprocess import call, NoUserException
 from v2.runner_policy import BUILD_WORKERS, TEST_WORKERS, NUM_CORES, SharedCorePool, TaskType
 from v2.workspace import (
@@ -52,9 +54,10 @@ class RunnerState:
 
     _lock: threading.Lock
     _frozen: bool
+    _allowed_shas: Optional[Set[str]]
 
     @staticmethod
-    def from_file(frozen: bool = False) -> "RunnerState":
+    def from_file(frozen: bool = False, allowed_shas: Optional[Set[str]] = None) -> "RunnerState":
         state = {}
         if os.path.exists(_STATE_PATH):
             with open(_STATE_PATH, "rt") as f:
@@ -68,21 +71,23 @@ class RunnerState:
             state.get("tested", {}),
             threading.Lock(),
             frozen,
+            allowed_shas,
         )
 
         result._build_queue.extend_contents(result._built.keys())
         result._test_queue.extend_contents(result._tested.keys())
 
         for i in result._built.keys():
-            result._test_queue.append(i)
+            if result.allowed_sha(i):
+                result._test_queue.append(i)
 
         return result
 
     @staticmethod
-    def clean(frozen: bool = False) -> "RunnerState":
+    def clean(frozen: bool = False, allowed_shas: Optional[Set[str]] = None) -> "RunnerState":
         if os.path.exists(_STATE_PATH):
             os.remove(_STATE_PATH)
-        return RunnerState.from_file(frozen)
+        return RunnerState.from_file(frozen, allowed_shas)
 
     @property
     def frozen(self) -> bool:
@@ -110,10 +115,13 @@ class RunnerState:
                 "tested": self._tested,
             }, f, indent=4)
 
+    def allowed_sha(self, sha:str) -> bool:
+        return self._allowed_shas is None or sha in self._allowed_shas
+
     def maybe_enqueue_build(self, sha: str) -> None:
         assert not self.frozen
         with self._lock:
-            if sha in self._built or sha in self._in_progress:
+            if sha in self._built or sha in self._in_progress or not self.allowed_sha(sha):
                 return
 
             self._build_queue.append(sha)
@@ -183,12 +191,18 @@ class Runner:
         MUTATION_LOCK.get()
         init_pytorch.fetch_fbcode_warm()
 
-        self._state = RunnerState.from_file(frozen=False)
-        self._core_pool = SharedCorePool()
-        self._lock = threading.RLock()
         self._history = init_pytorch.get_history().since(SWEEP_START)
         self._history_dict = {commit.sha: commit for commit in self._history}
         self._history_indices = {commit.sha: i for i, commit in enumerate(self._history)}
+
+        self._state = RunnerState.from_file(
+            frozen=False,
+            allowed_shas=set(self._history_dict.keys())
+        )
+
+        self._core_pool = SharedCorePool()
+        self._lock = threading.RLock()
+
         self._success_by_sha = {}
         self._main_thread = threading.get_ident()
 
@@ -217,9 +231,10 @@ class Runner:
         self._benchmarks = None
 
     def run(self):
+        self._update_success_dict()
+
         assert self._benchmarks is None
         self._benchmarks = get_benchmarks()
-        self._update_success_dict()
 
         worker_specs = (
             [(WorkerType.CONTROL, 0)] +
@@ -260,6 +275,8 @@ class Runner:
                         stop = True
 
                 if worker_type == WorkerType.STATUS:
+                    self.bisect()
+
                     self_repr = repr(self) + "\n"
                     with open(STATUS_FILE, "wt") as f:
                         f.write(self_repr)
@@ -406,9 +423,9 @@ class Runner:
         for w in work_orders:
             key = (
                 w.label,
-                lang_to_str[w.auto_labels.language],
-                w.auto_labels.autograd.value,
-                w.auto_labels.runtime.value,
+                lang_to_str[w.autolabels.language],
+                w.autolabels.autograd.value,
+                w.autolabels.runtime.value,
                 w.timer_args.num_threads,
             )
             if key in success:
@@ -422,6 +439,9 @@ class Runner:
                 cmd,
                 cwd=tempfile.gettempdir(),
                 shell=True,
+                env={
+                    "MKL_THREADING_LAYER": "GNU",
+                },
                 conda_env=conda_env,
                 timeout=60,
                 log_dir=RUN_LOG_ROOT,
@@ -472,7 +492,10 @@ class Runner:
                 sha,
                 commit.build_cfg,
                 show_progress=(threading.get_ident() == self._main_thread),
-                taskset_cores=allocation,
+
+                # Lockdown should handle isolation.
+                # taskset_cores=allocation,
+
                 nice="15",
                 max_jobs=core_request,
             )
@@ -613,7 +636,7 @@ class Runner:
             for label, auto_labels, timer_args in self._benchmarks:
                 work_orders.append(WorkOrder(
                     label=label,
-                    auto_labels=auto_labels,
+                    autolabels=auto_labels,
                     timer_args=timer_args,
                     source_cmd=f"source activate {conda_env}",
                     timeout=600.0 if "LSTM" in label else 360.0,
@@ -631,7 +654,6 @@ class Runner:
             log_measure_state("Benchmark run complete.")
 
             simple_results = []
-            raw_results = []
             lang_to_str = {Language.PYTHON: "Python", Language.CPP: "C++"}
             for w in work_orders:
                 if w not in results:
@@ -640,17 +662,15 @@ class Runner:
                 r = results[w]
                 simple_results.append(BenchmarkResult(
                     w.label,
-                    lang_to_str[w.auto_labels.language],
-                    w.auto_labels.autograd.value,
-                    w.auto_labels.runtime.value,
+                    lang_to_str[w.autolabels.language],
+                    w.autolabels.autograd.value,
+                    w.autolabels.runtime.value,
                     w.timer_args.num_threads,
-                    r.wall_time.median,
-                    r.instructions.counts(denoise=True),
+                    r.wall_times,
+                    r.instructions,
                 ))
-                raw_results.append((w.label, w.auto_labels, r))
 
             simple_path = os.path.join(RUN_COMPLETED_ROOT, f"{name}.pkl")
-            raw_path = os.path.join(RUN_COMPLETED_ROOT, f"{name}_raw.pkl")
 
             with open(simple_path, "wb") as f:
                 pickle.dump(BenchmarkResults(
@@ -658,9 +678,6 @@ class Runner:
                     conda_env=conda_env,
                     values=tuple(simple_results)
                 ), f)
-
-            with open(raw_path, "wb") as f:
-                pickle.dump([sha, conda_env, raw_results], f)
 
             self._state.report_finished(TaskType.MEASURE, sha=sha, result=simple_path)
             os.chmod(conda_lib_path, 0o755)
@@ -682,10 +699,10 @@ class Runner:
             self._core_pool.finish_task()
             cleanup()
 
-    def _group_ranges(self) -> Tuple[ResultRange]:
+    def _group_ranges(self, split_unbuildable: bool = True) -> Tuple[ResultRange, ...]:
         intermediate_commits = {}
         for commit in self._history:
-            if commit.sha in self._state._tested or check_unbuildable(commit.sha):
+            if commit.sha in self._state._tested or (split_unbuildable and check_unbuildable(commit.sha)):
                 current_commit = commit
                 intermediate_commits[current_commit] = []
             elif intermediate_commits:
@@ -709,3 +726,8 @@ class Runner:
                 get_results(upper_commit),
             ))
         return tuple(result_ranges)
+
+    def bisect(self):
+        candidate_shas = bisection_step(self._group_ranges(split_unbuildable=True)[::-1])
+        for sha in candidate_shas:
+            self._state.maybe_enqueue_build(sha)

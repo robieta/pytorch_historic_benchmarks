@@ -7,6 +7,7 @@ import statistics
 import textwrap
 from typing import Iterator, List, Optional, Tuple
 
+import numpy as np
 from yattag import Doc, indent
 
 from v2.build import check_unbuildable
@@ -74,8 +75,8 @@ def make_report(self: Runner):
         if r.key not in all_keys:
             all_keys.append(r.key)
 
-        low_water_mark.setdefault(r.key, r.instructions)
-        low_water_mark[r.key] = min(low_water_mark[r.key], r.instructions)
+        low_water_mark.setdefault(r.key, int(np.median(r.instructions)))
+        low_water_mark[r.key] = min(low_water_mark[r.key], int(np.median(r.instructions)))
 
     cols = sorted(
         {(label, autograd, runtime, num_threads)
@@ -93,7 +94,7 @@ def make_report(self: Runner):
         if result_range.upper_results is None:
             continue
 
-        at_new = {r.key: r.instructions for r in result_range.upper_results.values}
+        at_new = {r.key: int(np.median(r.instructions)) for r in result_range.upper_results.values}
         if len(at_new) >= len(all_tests_ref):
             all_tests_ref = at_new
     assert len(all_tests_ref) == len(all_keys), f"{len(all_tests_ref)} {len(all_keys)}"
@@ -116,8 +117,8 @@ def make_report(self: Runner):
 
         grid = [[None, None] for _ in range(len(cols))]
 
-        lower = {r.key: r.instructions for r in result_range.lower_results.values}
-        upper = {r.key: r.instructions for r in result_range.upper_results.values}
+        lower = {r.key: int(np.median(r.instructions)) for r in result_range.lower_results.values}
+        upper = {r.key: int(np.median(r.instructions)) for r in result_range.upper_results.values}
 
         for key, i1 in upper.items():
             if key not in lower:
@@ -127,7 +128,7 @@ def make_report(self: Runner):
             abs_delta = abs(i1 - i0) / statistics.mean([i0, i1])
             rel_delta = (i1 - i0) / low_water_mark[key]
 
-            if abs_delta > 0.03 and result_range.lower_commit.date_str >= "09/01/2020":
+            if abs_delta > 0.03:  # and result_range.lower_commit.date_str >= "09/01/2020":
                 include_in_bisect = True
 
             i, j = grid_pos[key]
@@ -150,7 +151,7 @@ def make_report(self: Runner):
         if grid is None:
             row_counts[sha] = grid = [[None, None] for _ in range(len(cols))]
         i, j = grid_pos[r.key]
-        grid[i][j] = r.instructions
+        grid[i][j] = int(np.median(r.instructions))
 
     bisect_count = 0
     for bisect_range in bisect_ranges:
