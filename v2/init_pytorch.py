@@ -38,6 +38,7 @@ def _fetch_branch(branch_name: str, branch_path: str) -> None:
     print(f"Checking out {branch_name}")
     call(
         f"""
+        git remote prune origin
         git checkout {branch_name}
         git pull
         git clean -fd

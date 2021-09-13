@@ -52,9 +52,11 @@ class RunnerState:
     _built: Dict[str, str]
     _tested: Dict[str, str]
 
-    _lock: threading.Lock
+    _lock: threading.RLock
     _frozen: bool
     _allowed_shas: Optional[Set[str]]
+
+    _artifact_by_sha: Dict[str, str]
 
     @staticmethod
     def from_file(frozen: bool = False, allowed_shas: Optional[Set[str]] = None) -> "RunnerState":
@@ -63,15 +65,30 @@ class RunnerState:
             with open(_STATE_PATH, "rt") as f:
                 state = json.load(f)
 
+        # TODO: remove later
+        archived_builds = [
+            os.path.join(OVERFLOW_ROOT, i)
+            for i in os.listdir(OVERFLOW_ROOT)
+        ] + [
+            os.path.join(BUILD_COMPLETED_ROOT, i)
+            for i in os.listdir(BUILD_COMPLETED_ROOT)
+        ]
+
+        artifact_by_sha = {
+            i.split("_")[-1].split(".")[0]:i
+            for i in archived_builds
+        }
+
         result = RunnerState(
             UniqueDeque(),
             UniqueDeque(),
             {},
             state.get("built", {}),
             state.get("tested", {}),
-            threading.Lock(),
+            threading.RLock(),
             frozen,
             allowed_shas,
+            artifact_by_sha,
         )
 
         result._build_queue.extend_contents(result._built.keys())
@@ -122,9 +139,14 @@ class RunnerState:
         assert not self.frozen
         with self._lock:
             if sha in self._built or sha in self._in_progress or not self.allowed_sha(sha):
-                return
+                pass
 
-            self._build_queue.append(sha)
+            # TODO: remove
+            elif sha in self._artifact_by_sha:
+                self.report_finished(TaskType.BUILD, sha, self._artifact_by_sha[sha], artifact=True)
+
+            else:
+                self._build_queue.append(sha)
 
     def unsafe_reenqueue(self, sha: str, task_type: TaskType):
         assert not self.frozen
@@ -149,7 +171,13 @@ class RunnerState:
                 self._in_progress[output] = task_type
                 return output
 
-    def report_finished(self, task_type: TaskType, sha: str, result: str) -> None:
+    def report_finished(
+        self,
+        task_type: TaskType,
+        sha: str,
+        result: str,
+        artifact: bool = False,
+    ) -> None:
         assert not self.frozen
         results, next_queue = {
             TaskType.BUILD: (self._built, self._test_queue),
@@ -158,8 +186,11 @@ class RunnerState:
 
         with self._lock:
             results[sha] = result
-            assert self._in_progress[sha] == task_type
-            self._in_progress.pop(sha)
+
+            if not artifact:
+                assert self._in_progress[sha] == task_type
+                self._in_progress.pop(sha)
+
             if next_queue is not None:
                 next_queue.append(sha)
             self.to_file()
@@ -267,8 +298,6 @@ class Runner:
                     if os.path.exists(CALL_DEBUG_FILE):
                         os.remove(CALL_DEBUG_FILE)
                         self.debug()
-
-                    # TODO: Bisection.
 
                     time.sleep(1)
                     if self._stop and self._active_workers <= 1:

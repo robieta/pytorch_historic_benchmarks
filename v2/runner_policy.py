@@ -43,8 +43,8 @@ class SharedCorePool:
         self._cost = {}
         self._max_total_cores = NUM_CORES - POOL_SLACK
         self._max_cores_by_type = {
-            TaskType.BUILD: int(0.2 * NUM_CORES),
-            TaskType.MEASURE: int(0.4 * NUM_CORES),
+            TaskType.BUILD: int(0.6 * NUM_CORES),
+            TaskType.MEASURE: int(0.6 * NUM_CORES),
             TaskType.ARCHIVE: NUM_CORES,
         }
         self._allocations_by_type = {

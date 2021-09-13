@@ -9,7 +9,7 @@ WORKSPACE_ROOT = os.path.join(ROOT, "workspace", f"sweeping_bisect_v{_VERSION}")
 RUNNER_STATE_ROOT = os.path.join(WORKSPACE_ROOT, "runner_state")
 
 BUILD_LOG_ROOT = os.path.join(WORKSPACE_ROOT, "build__logs")
-BUILD_IN_PROGRESS_ROOT = "/dev/shm/build__in_progress"
+BUILD_IN_PROGRESS_ROOT = os.path.join(WORKSPACE_ROOT, "build__in_progress")
 BUILD_COMPLETED_ROOT = os.path.join(WORKSPACE_ROOT, "build__completed")
 CANNOT_BUILD = os.path.join(WORKSPACE_ROOT, "cannot_build.txt")
 
@@ -41,7 +41,7 @@ BENCHMARK_ENV = os.path.join(WORKSPACE_ROOT, "pytorch_benchmark_env")
 BENCHMARK_ENV_BUILT = os.path.join(BENCHMARK_ENV, "BENCHMARK_ENV_BUILT")
 
 DATE_FMT = "%Y-%m-%d"
-SWEEP_START = "2021-04-01"  # "2018-06-01"
+SWEEP_START = "2021-01-01"
 SWEEP_CADENCE = 1  # day
 
 

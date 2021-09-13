@@ -17,7 +17,6 @@ def make_report(self: Runner):
     )
 
 
-
 def archive(self: Runner):
     import os
     import time
@@ -43,8 +42,8 @@ def debug_fn(r: Runner):
     import traceback
 
     try:
-        make_report(r)
-        # archive(r)
+        archive(r)
+        # make_report(r)
     except:
         traceback.print_tb(sys.exc_info()[2])
         raise

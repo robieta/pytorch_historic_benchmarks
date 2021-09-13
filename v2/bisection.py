@@ -51,6 +51,7 @@ def bisection_step(result_ranges: Tuple[ResultRange]) -> Tuple[str, ...]:
 
         lower = {r.key: r.ct for r in r_lower.values}
         upper = {r.key: r.ct for r in r_upper.values}
+
         if set(lower.keys()) != set(upper.keys()):
             measure_shas.append(intermediate_sha)
             continue
@@ -59,6 +60,11 @@ def bisection_step(result_ranges: Tuple[ResultRange]) -> Tuple[str, ...]:
         for k, v_lower in lower.items():
             v_upper = upper[k]
             delta = (v_upper - v_lower) / low_water_mark[k]
+
+            # TODO: Remove. Multithreaded Autograd went a bit haywire, so it has to be
+            # filtered to prevent thrashing.
+            if k[0] == ('training', 'ensemble') and k[2] == 'Forward + Backward' and k[4] > 1:
+                delta = 0
 
             shas_by_priority[intermediate_sha] += min(abs(delta / _BASELINE_THRESHOLD) ** _POWER, _CEIL_FACTOR)
 

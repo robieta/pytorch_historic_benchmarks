@@ -17,6 +17,7 @@ ARTIFACT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 METADATA_FILE = os.path.join(REPORT_ROOT, "metadata.json")
 GIT_HISTORY_FILE = os.path.join(REPORT_ROOT, "git_history.json")
+GIT_HISTORY_FULL_FILE = os.path.join(REPORT_ROOT, "git_history_full.json")
 GRAPH_DATA_FILE = os.path.join(REPORT_ROOT, "graph_data.json")
 TABLE_DATA_FILE = os.path.join(REPORT_ROOT, "table_data.json")
 
@@ -256,6 +257,12 @@ def gen_data(doc, tag, label_indices, history, cols, row_counts, row_deltas, res
         json.dump({
         commit.sha: (commit.author_name, commit.author_email, commit.date_str, commit.msg)
         for commit in tested_commits
+    }, f, indent=4)
+
+    with open(GIT_HISTORY_FULL_FILE, "wt") as f:
+        json.dump({
+        commit.sha: (commit.author_name, commit.author_email, commit.date_str, commit.msg)
+        for commit in history
     }, f, indent=4)
 
     graph_data = []
